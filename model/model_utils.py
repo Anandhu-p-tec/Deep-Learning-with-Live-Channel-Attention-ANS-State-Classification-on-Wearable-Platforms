@@ -80,35 +80,24 @@ class ANSClassifier(tf.keras.Model):
 		pcs_state = self.pcs_projection(bilstm_hidden)
 		return bilstm_hidden, pcs_state, cav
 
-	def call(self, inputs, training: bool = False):
+	def forward_with_cav(self, inputs, training: bool = False, mc_dropout: bool = False):
+		# For MC-dropout inference, keep BatchNorm/statistical layers in inference
+		# mode and activate only dropout for stochastic uncertainty sampling.
 		bilstm_hidden, _, cav = self.extract_features(inputs, training=training)
-		# Keep dropout active for MC-dropout uncertainty estimation.
-		x = self.dropout(bilstm_hidden, training=True)
+		dropout_active = bool(training or mc_dropout)
+		x = self.dropout(bilstm_hidden, training=dropout_active)
 		x = self.dense1(x)
 		probs = self.out_dense(x)
 		return probs, cav
 
-	def train_step(self, data):
-		x, y = data
-		with tf.GradientTape() as tape:
-			probs, _ = self(x, training=True)
-			loss = self.compiled_loss(y, probs, regularization_losses=self.losses)
-		gradients = tape.gradient(loss, self.trainable_variables)
-		self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-		self.compiled_metrics.update_state(y, probs)
-		return {m.name: m.result() for m in self.metrics}
-
-	def test_step(self, data):
-		x, y = data
-		probs, _ = self(x, training=False)
-		self.compiled_loss(y, probs, regularization_losses=self.losses)
-		self.compiled_metrics.update_state(y, probs)
-		return {m.name: m.result() for m in self.metrics}
+	def call(self, inputs, training: bool = False):
+		probs, _ = self.forward_with_cav(inputs, training=training, mc_dropout=False)
+		return probs
 
 
 def build_model() -> ANSClassifier:
 	model = ANSClassifier(name="ans_classifier")
-	model.build(input_shape=(None, 500, 4))
+	_ = model(tf.zeros((1, 500, 4), dtype=tf.float32), training=False)
 	return model
 
 
@@ -116,9 +105,23 @@ def _model_path() -> str:
 	return os.path.join(os.path.dirname(__file__), "saved", "ans_model.h5")
 
 
+def _weights_path() -> str:
+	return os.path.join(os.path.dirname(__file__), "saved", "ans_model.weights.h5")
+
+
 def load_or_create_model() -> ANSClassifier:
 	path = _model_path()
+	weights_path = _weights_path()
 	os.makedirs(os.path.dirname(path), exist_ok=True)
+
+	model = build_model()
+
+	if os.path.exists(weights_path):
+		try:
+			model.load_weights(weights_path)
+			return model
+		except Exception:
+			pass
 
 	if os.path.exists(path):
 		try:
@@ -131,7 +134,6 @@ def load_or_create_model() -> ANSClassifier:
 		except Exception:
 			pass
 
-	model = build_model()
 	x_dummy = np.random.rand(10, 500, 4).astype(np.float32)
 	y_idx = np.random.randint(0, len(CLASSES), size=(10,))
 	y_dummy = tf.keras.utils.to_categorical(y_idx, num_classes=len(CLASSES))
@@ -143,6 +145,7 @@ def load_or_create_model() -> ANSClassifier:
 	)
 	model.fit(x_dummy, y_dummy, epochs=1, batch_size=2, verbose=0)
 	model.save(path)
+	model.save_weights(weights_path)
 	return model
 
 
@@ -163,7 +166,7 @@ def mc_dropout_predict(model: ANSClassifier, window: np.ndarray, T: int = 20) ->
 	cav_samples = []
 
 	for _ in range(T):
-		probs, cav = model(batch, training=True)
+		probs, cav = model.forward_with_cav(batch, training=False, mc_dropout=True)
 		probs_samples.append(probs.numpy()[0])
 		cav_samples.append(cav.numpy()[0])
 

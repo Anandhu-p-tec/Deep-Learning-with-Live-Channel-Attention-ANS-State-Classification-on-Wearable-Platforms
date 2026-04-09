@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Dict, Optional
 
 from groq import Groq
@@ -77,9 +78,9 @@ def get_clinical_interpretation(
         )
 
         # Call Groq API
-        def _request_json(force_format: bool):
+        def _request_json(force_format: bool, model_name: str):
             kwargs = {
-                "model": "llama3-8b-8192",
+                "model": model_name,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
@@ -101,10 +102,45 @@ def get_clinical_interpretation(
                     return json.loads(text[start : end + 1])
                 raise
 
-        try:
-            message = _request_json(force_format=True)
-        except Exception:
-            message = _request_json(force_format=False)
+        configured_model = os.getenv("GROQ_MODEL", "").strip()
+        model_candidates = [
+            m
+            for m in [
+                configured_model,
+                "llama-3.1-8b-instant",
+                "llama-3.3-70b-versatile",
+                "llama3-8b-8192",
+            ]
+            if m
+        ]
+
+        message = None
+        last_error = None
+        for model_name in model_candidates:
+            try:
+                message = _request_json(force_format=True, model_name=model_name)
+                break
+            except Exception as exc:
+                last_error = exc
+                try:
+                    message = _request_json(force_format=False, model_name=model_name)
+                    break
+                except Exception as exc2:
+                    last_error = exc2
+                    continue
+
+        if message is None:
+            reason = str(last_error) if last_error else "Groq request failed"
+            short_reason = reason[:180]
+            return {
+                "interpretation": (
+                    "Clinical interpretation is temporarily unavailable from Groq. "
+                    f"Reason: {short_reason}."
+                ),
+                "what_to_watch": "Continue monitoring confidence and sensor coherence trend.",
+                "caregiver_action": "Retry shortly, or set GROQ_MODEL in .env to a currently supported model.",
+                "urgency": "monitor",
+            }
 
         # Extract response
         response_text = message.choices[0].message.content

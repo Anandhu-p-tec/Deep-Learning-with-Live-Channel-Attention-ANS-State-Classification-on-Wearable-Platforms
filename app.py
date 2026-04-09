@@ -308,62 +308,60 @@ def render_main_state_card(prediction: dict, pcs: float, sensor_conflict: bool, 
     conf = float(prediction["confidence"])
     conf_bar_color = confidence_color(conf)
 
-    st.markdown("<div style='border:1px solid #e5e7eb;border-radius:14px;padding:20px;background:#ffffff;'>", unsafe_allow_html=True)
-    col_left, col_right = st.columns([3, 2])
+    with st.container(border=True):
+        col_left, col_right = st.columns([3, 2])
 
-    with col_left:
-        st.markdown("<div style='color:#6b7280;font-size:0.8rem;letter-spacing:0.06em;'>AUTONOMIC NERVOUS SYSTEM STATE</div>", unsafe_allow_html=True)
-        st.markdown(
-            f"<div style='font-size:2.5rem;font-weight:800;color:{state_color};line-height:1.1;margin-top:6px;'>{state}</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"<div style='color:#6b7280;font-style:italic;font-size:1rem;margin-top:8px;'>{STATE_EXPLANATIONS[state]}</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown("<div style='margin-top:16px;font-weight:600;'>Model Confidence</div>", unsafe_allow_html=True)
-        st.markdown(
-            (
-                "<div style='display:flex;align-items:center;gap:10px;'>"
-                "<div style='flex:1;background:#f0f2f5;border-radius:999px;height:14px;overflow:hidden;'>"
-                f"<div style='width:{conf}%;background:{conf_bar_color};height:14px;'></div>"
-                "</div>"
-                f"<div style='min-width:54px;font-weight:700;'>{conf:.1f}%</div>"
-                "</div>"
-            ),
-            unsafe_allow_html=True,
-        )
+        with col_left:
+            st.markdown("<div style='color:#6b7280;font-size:0.8rem;letter-spacing:0.06em;'>AUTONOMIC NERVOUS SYSTEM STATE</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='font-size:2.5rem;font-weight:800;color:{state_color};line-height:1.1;margin-top:6px;'>{state}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='color:#6b7280;font-style:italic;font-size:1rem;margin-top:8px;'>{STATE_EXPLANATIONS[state]}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("<div style='margin-top:16px;font-weight:600;'>Model Confidence</div>", unsafe_allow_html=True)
+            st.markdown(
+                (
+                    "<div style='display:flex;align-items:center;gap:10px;'>"
+                    "<div style='flex:1;background:#f0f2f5;border-radius:999px;height:14px;overflow:hidden;'>"
+                    f"<div style='width:{conf}%;background:{conf_bar_color};height:14px;'></div>"
+                    "</div>"
+                    f"<div style='min-width:54px;font-weight:700;'>{conf:.1f}%</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
-    with col_right:
-        metrics = [
-            ("PCS Score", f"{pcs:.2f}", "Coherent ✓" if not sensor_conflict else "Conflict ⚠"),
-            (
-                "Uncertainty",
-                f"{prediction['variance']:.4f}",
-                "Reliable" if not prediction["low_confidence"] else "Low Conf ⚠",
-            ),
-            ("Dominant Sensor", prediction["dominant_sensor"], "Primary Driver"),
-            ("Reading #", str(st.session_state.reading_count), "Auto-updating"),
-        ]
-        grid_rows = [st.columns(2), st.columns(2)]
-        idx = 0
-        for row in grid_rows:
-            for col in row:
-                title, value, note = metrics[idx]
-                with col:
-                    st.markdown(
-                        (
-                            "<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;background:#f9fafb;margin-bottom:10px;'>"
-                            f"<div style='font-size:0.8rem;color:#6b7280;'>{title}</div>"
-                            f"<div style='font-size:1.2rem;font-weight:700;margin-top:2px;'>{value}</div>"
-                            f"<div style='font-size:0.8rem;color:#6b7280;margin-top:2px;'>{note}</div>"
-                            "</div>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                idx += 1
-
-    st.markdown("</div>", unsafe_allow_html=True)
+        with col_right:
+            metrics = [
+                ("PCS Score", f"{pcs:.2f}", "Coherent ✓" if not sensor_conflict else "Conflict ⚠"),
+                (
+                    "Uncertainty",
+                    f"{prediction['variance']:.4f}",
+                    "Reliable" if not prediction["low_confidence"] else "Low Conf ⚠",
+                ),
+                ("Dominant Sensor", prediction["dominant_sensor"], "Primary Driver"),
+                ("Reading #", str(st.session_state.reading_count), "Auto-updating"),
+            ]
+            grid_rows = [st.columns(2), st.columns(2)]
+            idx = 0
+            for row in grid_rows:
+                for col in row:
+                    title, value, note = metrics[idx]
+                    with col:
+                        st.markdown(
+                            (
+                                "<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;background:#f9fafb;color:#111827;margin-bottom:10px;'>"
+                                f"<div style='font-size:0.8rem;color:#6b7280;'>{title}</div>"
+                                f"<div style='font-size:1.2rem;font-weight:700;color:#111827;margin-top:2px;'>{value}</div>"
+                                f"<div style='font-size:0.8rem;color:#6b7280;margin-top:2px;'>{note}</div>"
+                                "</div>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    idx += 1
 
     if state in ("Sympathetic Arousal", "Mixed Dysregulation") and conf >= 75:
         st.markdown(
@@ -392,21 +390,17 @@ def render_sensor_section(window: np.ndarray, prediction: dict, display_state: s
         with cols[idx]:
             val = sensor_values[key]
             weight = float(prediction["cav"].get(key, 0.0))
-            st.markdown(
-                "<div style='border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#ffffff;min-height:270px;'>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"<div style='font-weight:700;'>{icon} {label}</div>", unsafe_allow_html=True)
-            st.markdown("<div style='margin-top:10px;font-size:0.85rem;color:#6b7280;'>Current signal level</div>", unsafe_allow_html=True)
-            st.progress(float(val["norm"]))
-            st.markdown(f"<div style='font-size:0.95rem;margin-top:4px;'>{val['label']}</div>", unsafe_allow_html=True)
-            st.markdown(
-                f"<div style='font-size:0.9rem;color:{color};margin-top:10px;font-weight:700;'>AI weight: {weight*100:.0f}%</div>",
-                unsafe_allow_html=True,
-            )
-            st.progress(weight)
-            st.markdown(f"<div style='font-size:0.85rem;color:#6b7280;margin-top:8px;'>Signal quality: {val['quality']}</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(f"<div style='font-weight:700;color:#111827;'>{icon} {label}</div>", unsafe_allow_html=True)
+                st.markdown("<div style='margin-top:10px;font-size:0.85rem;color:#6b7280;'>Current signal level</div>", unsafe_allow_html=True)
+                st.progress(float(val["norm"]))
+                st.markdown(f"<div style='font-size:0.95rem;color:#111827;margin-top:4px;'>{val['label']}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='font-size:0.9rem;color:{color};margin-top:10px;font-weight:700;'>AI weight: {weight*100:.0f}%</div>",
+                    unsafe_allow_html=True,
+                )
+                st.progress(weight)
+                st.markdown(f"<div style='font-size:0.85rem;color:#6b7280;margin-top:8px;'>Signal quality: {val['quality']}</div>", unsafe_allow_html=True)
 
     story = dominant_sensor_story(prediction["dominant_sensor"], display_state)
     st.info(story)
@@ -440,7 +434,7 @@ def render_clinical_section(clinical_payload: Optional[dict], state_color: str, 
         (
             f"<div style='border-left:6px solid {state_color};background:#ffffff;border-radius:8px;"
             "padding:16px;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;'>"
-            f"<div style='font-size:1.05rem;line-height:1.6;'>{interpretation}</div>"
+            f"<div style='font-size:1.05rem;line-height:1.6;color:#1f2937;'>{interpretation}</div>"
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -449,19 +443,19 @@ def render_clinical_section(clinical_payload: Optional[dict], state_color: str, 
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
-            f"<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;'><div style='font-weight:700;'>👁 Watch For</div><div style='margin-top:8px;color:#374151;'>{what_to_watch}</div></div>",
+            f"<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;background:#ffffff;color:#1f2937;'><div style='font-weight:700;color:#111827;'>👁 Watch For</div><div style='margin-top:8px;color:#374151;'>{what_to_watch}</div></div>",
             unsafe_allow_html=True,
         )
     with c2:
         st.markdown(
-            f"<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;'><div style='font-weight:700;'>👤 Caregiver Action</div><div style='margin-top:8px;color:#374151;'>{caregiver_action}</div></div>",
+            f"<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;background:#ffffff;color:#1f2937;'><div style='font-weight:700;color:#111827;'>👤 Caregiver Action</div><div style='margin-top:8px;color:#374151;'>{caregiver_action}</div></div>",
             unsafe_allow_html=True,
         )
     with c3:
         st.markdown(
             (
-                "<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;'>"
-                "<div style='font-weight:700;'>🚦 Urgency Level</div>"
+                "<div style='border:1px solid #e5e7eb;border-radius:10px;padding:12px;min-height:120px;background:#ffffff;color:#1f2937;'>"
+                "<div style='font-weight:700;color:#111827;'>🚦 Urgency Level</div>"
                 f"<div style='margin-top:14px;'><span style='background:{urgency_color};color:#fff;padding:6px 12px;border-radius:999px;font-weight:700;text-transform:uppercase;'>{urgency}</span></div>"
                 "</div>"
             ),
@@ -550,6 +544,8 @@ def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[s
         )
 
     interval = st.sidebar.slider("Update interval (seconds)", 1, 10, 3)
+    st.sidebar.button("Refresh reading", type="primary", width="stretch")
+    st.sidebar.caption("Manual refresh keeps the screen stable and avoids flashing.")
 
     st.sidebar.divider()
     st.sidebar.markdown("### 🔑 Groq API Key")
@@ -673,8 +669,7 @@ def main():
         except Exception as e:
             st.error(f"Section failed: {e}")
 
-    time.sleep(interval)
-    st.rerun()
+    st.caption(f"Refresh manually using the sidebar button. Suggested interval: {interval}s")
 
 
 if __name__ == "__main__":

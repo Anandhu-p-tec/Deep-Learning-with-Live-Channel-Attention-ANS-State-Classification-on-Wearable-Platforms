@@ -20,6 +20,16 @@ This is a production-ready Streamlit dashboard for **real-time ANS (Autonomic Ne
 
 ## 🚀 Quick Start (5 minutes)
 
+### Demo-safe launch command
+
+Use the short-path launcher during the presentation:
+
+```powershell
+.\run_demo.ps1
+```
+
+This uses the known-good `venv_short` environment and avoids the Windows long-path TensorFlow install issue.
+
 ### Step 1: Activate Virtual Environment
 
 **Windows (PowerShell):**
@@ -43,6 +53,8 @@ pip install -r requirements.txt
 ```
 
 If you encounter TensorFlow installation errors on Windows with long paths, see **Troubleshooting** section below.
+
+For the live demo, prefer `run_demo.ps1` instead of reinstalling dependencies.
 
 ### Step 3: Run the Dashboard
 ```bash

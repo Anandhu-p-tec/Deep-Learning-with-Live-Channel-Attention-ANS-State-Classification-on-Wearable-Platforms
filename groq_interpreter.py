@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Dict, Optional
 
 from groq import Groq
 
@@ -15,7 +16,7 @@ def get_clinical_interpretation(
     sensor_conflict: bool,
     low_confidence: bool,
     api_key: Optional[str],
-) -> Optional[str]:
+) -> Optional[Dict[str, str]]:
     """
     Get clinical interpretation of ANS classification using Groq LLM.
 
@@ -29,7 +30,7 @@ def get_clinical_interpretation(
         api_key: Groq API key
 
     Returns:
-        Clinical interpretation string, or None if unavailable.
+        Dict with interpretation fields, or None if unavailable.
         Never raises exceptions.
     """
     try:
@@ -46,8 +47,10 @@ def get_clinical_interpretation(
             "system monitoring data from a wearable sensor device. You provide "
             "brief, accurate, plain-English clinical interpretations of ANS "
             "state classifications. You never diagnose. You always recommend "
-            "physician review for any anomalous findings. Keep responses to "
-            "2-3 sentences maximum."
+            "physician review for any anomalous findings. Respond ONLY with "
+            "valid JSON matching this exact structure and no other text: "
+            "{\"interpretation\":\"...\",\"what_to_watch\":\"...\","
+            "\"caregiver_action\":\"...\",\"urgency\":\"routine|monitor|alert\"}."
         )
 
         # Determine dominant sensor
@@ -66,24 +69,71 @@ def get_clinical_interpretation(
             f"- Physiological Coherence Score: {pcs_score}\n"
             f"- Sensor Conflict Detected: {sensor_conflict}\n"
             f"- Low Confidence Flag: {low_confidence}\n\n"
-            f"Provide a brief clinical interpretation of what this pattern "
-            f"suggests and what a caregiver should monitor."
+            "Return JSON where:\n"
+            "- interpretation: 2-3 sentence clinical interpretation\n"
+            "- what_to_watch: one sentence on what physiological sign to watch next\n"
+            "- caregiver_action: one sentence for a non-medical caregiver right now\n"
+            "- urgency: one of routine, monitor, alert"
         )
 
         # Call Groq API
-        message = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            max_tokens=150,
-            temperature=0.3,
-        )
+        def _request_json(force_format: bool):
+            kwargs = {
+                "model": "llama3-8b-8192",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "max_tokens": 220,
+                "temperature": 0.3,
+            }
+            if force_format:
+                kwargs["response_format"] = {"type": "json_object"}
+            return client.chat.completions.create(**kwargs)
+
+        def _parse_payload(text: str):
+            try:
+                return json.loads(text)
+            except Exception:
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    return json.loads(text[start : end + 1])
+                raise
+
+        try:
+            message = _request_json(force_format=True)
+        except Exception:
+            message = _request_json(force_format=False)
 
         # Extract response
         response_text = message.choices[0].message.content
-        return response_text if response_text else None
+        if not response_text:
+            return None
+
+        payload = _parse_payload(response_text)
+        required_keys = [
+            "interpretation",
+            "what_to_watch",
+            "caregiver_action",
+            "urgency",
+        ]
+        if not all(k in payload for k in required_keys):
+            return None
+
+        urgency = str(payload.get("urgency", "")).strip().lower()
+        if urgency not in {"routine", "monitor", "alert"}:
+            urgency = "monitor"
+
+        cleaned = {
+            "interpretation": str(payload.get("interpretation", "")).strip(),
+            "what_to_watch": str(payload.get("what_to_watch", "")).strip(),
+            "caregiver_action": str(payload.get("caregiver_action", "")).strip(),
+            "urgency": urgency,
+        }
+        if not all(cleaned.values()):
+            return None
+        return cleaned
 
     except Exception:
         # Silently return None on any error

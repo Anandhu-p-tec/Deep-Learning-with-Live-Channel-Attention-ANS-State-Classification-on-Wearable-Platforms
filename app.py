@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -22,6 +23,8 @@ defaults = {
     "reading_count": 0,
     "mode": "auto",
     "current_alerts": [],
+    "io_status": {},
+    "last_raw": None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -52,6 +55,14 @@ from groq_interpreter import get_clinical_interpretation
 
 load_dotenv()
 GROQ_API_KEY_ENV = os.getenv("GROQ_API_KEY", "")
+ESP32_PORT_ENV = os.getenv("ESP32_PORT", "COM3").strip() or "COM3"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 STATE_EXPLANATIONS = {
     "Normal Baseline": "Your autonomic nervous system is balanced and stable.",
@@ -91,26 +102,86 @@ def load_model():
 
 
 def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
-    if st.session_state.mode == "auto":
-        st.session_state.mode = "hardware" if has_device() else "simulation"
-
+    # Always prefer live hardware when it is available, so a previous
+    # simulation fallback does not permanently lock the session.
+    st.session_state.mode = "hardware" if has_device(preferred_port=ESP32_PORT_ENV) else "simulation"
     mode = st.session_state.mode
+    if mode == "hardware":
+        logger.info("✅ ESP32 CONNECTED on COM3 — Live mode active")
+    else:
+        logger.info("⚠️  No hardware — Simulation mode active")
     return mode, None
+
+
+def _resample_window(window: np.ndarray, target_samples: int = 500) -> np.ndarray:
+    """Resample (N,4) window to fixed model shape (500,4)."""
+    if window.shape[0] == target_samples:
+        return window
+
+    src_idx = np.linspace(0.0, 1.0, num=window.shape[0], dtype=np.float32)
+    dst_idx = np.linspace(0.0, 1.0, num=target_samples, dtype=np.float32)
+    out = np.zeros((target_samples, window.shape[1]), dtype=np.float32)
+
+    for ch in range(window.shape[1]):
+        out[:, ch] = np.interp(dst_idx, src_idx, window[:, ch]).astype(np.float32)
+    return out
 
 
 def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]:
     try:
         if mode == "hardware":
-            reader = ESP32Reader()
-            window = reader.read_window(n_samples=500)
+            # Read a shorter live window for faster startup, then resample.
+            reader = ESP32Reader(
+                read_timeout=0.15,
+                scan_timeout=0.8,
+                preferred_port=ESP32_PORT_ENV,
+            )
+            window = reader.read_window(n_samples=60, max_window_seconds=2.5)
+            stats = dict(reader.last_stats)
+            last_raw = dict(reader.last_raw) if reader.last_raw else None
             reader.close()
-            if window is None:
+            st.session_state.io_status = stats
+            st.session_state.last_raw = last_raw
+            logger.info(
+                "[HW] port=%s ok=%s samples=%s/%s valid=%s invalid=%s elapsed=%.3fs reason=%s",
+                stats.get("port"),
+                stats.get("ok"),
+                stats.get("collected_samples"),
+                stats.get("requested_samples"),
+                stats.get("valid_lines"),
+                stats.get("invalid_lines"),
+                float(stats.get("elapsed_seconds", 0.0)),
+                stats.get("reason"),
+            )
+            if stats.get("last_valid_line"):
+                logger.info("[HW] last_valid_line=%s", stats.get("last_valid_line"))
+            if window is None or window.shape[0] < 1:
                 st.session_state.mode = "simulation"
+                st.session_state.io_status = {
+                    **stats,
+                    "ok": False,
+                    "reason": "fallback_to_simulation",
+                }
                 return get_simulated_window("normal_baseline", n_samples=500)
-            return window
+            return _resample_window(window, target_samples=500)
+        st.session_state.io_status = {}
+        st.session_state.last_raw = None
         return get_simulated_window(sim_state or "normal_baseline", n_samples=500)
     except Exception:
-        return None
+        st.session_state.mode = "simulation"
+        logger.exception("[HW] read failure, switching to simulation")
+        st.session_state.io_status = {
+            "port": ESP32_PORT_ENV,
+            "ok": False,
+            "reason": "exception_fallback",
+            "collected_samples": 0,
+            "requested_samples": 60,
+            "valid_lines": 0,
+            "invalid_lines": 0,
+            "elapsed_seconds": 0.0,
+            "last_valid_line": "",
+        }
+        return get_simulated_window("normal_baseline", n_samples=500)
 
 
 def confidence_color(conf: float) -> str:
@@ -282,6 +353,7 @@ def run_signal_validation(window: np.ndarray, sensor_conflict: bool) -> dict:
     return {
         "checks": checks,
         "score": score,
+        "signal_quality_score": score,
         "label": quality_label,
         "channel_quality": channel_quality,
     }
@@ -391,10 +463,14 @@ def render_sensor_section(window: np.ndarray, prediction: dict, display_state: s
             val = sensor_values[key]
             weight = float(prediction["cav"].get(key, 0.0))
             with st.container(border=True):
-                st.markdown(f"<div style='font-weight:700;color:#111827;'>{icon} {label}</div>", unsafe_allow_html=True)
+                sensor_name = f"{icon} {label}"
+                st.markdown(
+                    f"<p style='color: white; font-weight: bold; font-size: 14px;'>{sensor_name}</p>",
+                    unsafe_allow_html=True,
+                )
                 st.markdown("<div style='margin-top:10px;font-size:0.85rem;color:#6b7280;'>Current signal level</div>", unsafe_allow_html=True)
                 st.progress(float(val["norm"]))
-                st.markdown(f"<div style='font-size:0.95rem;color:#111827;margin-top:4px;'>{val['label']}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:0.95rem;color:#d1d5db;margin-top:4px;'>{val['label']}</div>", unsafe_allow_html=True)
                 st.markdown(
                     f"<div style='font-size:0.9rem;color:{color};margin-top:10px;font-weight:700;'>AI weight: {weight*100:.0f}%</div>",
                     unsafe_allow_html=True,
@@ -526,7 +602,7 @@ def render_history_section():
     st.plotly_chart(fig, width="stretch")
 
 
-def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[str], int, str]:
+def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[str], int, bool, str]:
     st.sidebar.markdown("### ⚙ Controls")
 
     sim_state = None
@@ -543,9 +619,49 @@ def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[s
             key="sim_state_sidebar",
         )
 
-    interval = st.sidebar.slider("Update interval (seconds)", 1, 10, 3)
+    # Auto-refresh toggle in sidebar
+    auto_refresh = st.sidebar.toggle(
+        "Auto-refresh",
+        value=True,
+        help="Continuously update readings",
+    )
+
+    # Reading interval
+    interval = st.sidebar.slider(
+        "Update interval (seconds)",
+        1, 10, 3
+    )
     st.sidebar.button("Refresh reading", type="primary", width="stretch")
     st.sidebar.caption("Manual refresh keeps the screen stable and avoids flashing.")
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### 📡 Live Sensor Readings")
+
+    if st.session_state.get("last_raw"):
+        raw = st.session_state.last_raw
+
+        # Color code each value
+        gsr_val = raw.get("GSR", 0)
+        gsr_color = "🔴" if gsr_val > 2000 else "🟢"
+
+        spo2_val = raw.get("SPO2", 0)
+        spo2_color = "🔴" if spo2_val < 94 and spo2_val > 0 else "🟢"
+
+        temp_val = raw.get("TEMP", 0)
+        temp_color = "🔴" if temp_val > 37.5 else "🟢"
+
+        bpm_val = raw.get("BPM", 0)
+        bpm_color = "🔴" if bpm_val > 110 or (bpm_val > 0 and bpm_val < 50) else "🟢"
+
+        st.sidebar.markdown(
+            f"{gsr_color} **GSR:** {gsr_val:.0f}\n\n"
+            f"{spo2_color} **SpO2:** {spo2_val:.1f}%\n\n"
+            f"{temp_color} **Temp:** {temp_val:.1f}°C\n\n"
+            f"{bpm_color} **BPM:** {bpm_val:.0f}\n\n"
+            f"🔵 **State:** {raw.get('STATE', 'UNKNOWN')}"
+        )
+    else:
+        st.sidebar.info("Waiting for first reading...")
 
     st.sidebar.divider()
     st.sidebar.markdown("### 🔑 Groq API Key")
@@ -581,13 +697,13 @@ def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[s
         last_ts = st.session_state.last_result.get("timestamp", "--:--:--")
     st.sidebar.caption(f"Last reading: {last_ts}")
 
-    return sim_state, interval, st.session_state.groq_key
+    return sim_state, interval, auto_refresh, st.session_state.groq_key
 
 
 def main():
     mode, _ = get_mode_and_sim_state()
 
-    sim_state, interval, groq_key = render_sidebar(mode, st.session_state.current_alerts)
+    sim_state, interval, auto_refresh, groq_key = render_sidebar(mode, st.session_state.current_alerts)
 
     model = load_model()
     window = get_next_window(mode, sim_state)
@@ -628,6 +744,33 @@ def main():
     st.session_state.history.append(snapshot)
     if len(st.session_state.history) > 20:
         st.session_state.history = st.session_state.history[-20:]
+
+    # Structured terminal logs for each classification cycle
+    count = st.session_state.reading_count
+    pcs_val = pcs
+    logger.info(
+        f"📊 Reading #{count} | "
+        f"State: {prediction['predicted_class']} | "
+        f"Confidence: {prediction['confidence']}% | "
+        f"Dominant: {prediction['dominant_sensor']} | "
+        f"PCS: {pcs_val:.2f} | "
+        f"Quality: {validation['signal_quality_score']}/100"
+    )
+    if sensor_conflict:
+        logger.warning(
+            f"⚠️  SENSOR CONFLICT — PCS={pcs_val:.2f} "
+            f"below threshold 0.30"
+        )
+    if prediction["low_confidence"]:
+        logger.warning(
+            f"❓ LOW CONFIDENCE — variance="
+            f"{prediction['variance']:.4f} > 0.12"
+        )
+    if prediction["predicted_class"] in ("Sympathetic Arousal", "Mixed Dysregulation") and prediction["confidence"] >= 75:
+        logger.warning(
+            f"🚨 ALERT — {prediction['predicted_class']} "
+            f"detected at {prediction['confidence']}% confidence"
+        )
 
     with st.container():
         try:
@@ -670,6 +813,10 @@ def main():
             st.error(f"Section failed: {e}")
 
     st.caption(f"Refresh manually using the sidebar button. Suggested interval: {interval}s")
+
+    if auto_refresh:
+        time.sleep(interval)
+        st.rerun()
 
 
 if __name__ == "__main__":

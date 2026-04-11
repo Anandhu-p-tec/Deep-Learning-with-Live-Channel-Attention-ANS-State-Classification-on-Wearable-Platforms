@@ -28,6 +28,7 @@ defaults = {
     "current_alerts": [],
     "io_status": {},
     "last_raw": None,
+    "last_window": None,
     "sensor_history": {
         "readings": [],
         "gsr": [],
@@ -167,18 +168,48 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
             if stats.get("last_valid_line"):
                 logger.info("[HW] last_valid_line=%s", stats.get("last_valid_line"))
             if window is None or window.shape[0] < 1:
+                if st.session_state.get("last_window") is not None:
+                    st.session_state.io_status = {
+                        **stats,
+                        "ok": False,
+                        "reason": "reused_last_window",
+                    }
+                    return st.session_state.last_window
+
                 st.session_state.mode = "simulation"
                 st.session_state.io_status = {
                     **stats,
                     "ok": False,
                     "reason": "fallback_to_simulation",
                 }
-                return get_simulated_window("normal_baseline", n_samples=500)
-            return _resample_window(window, target_samples=500)
+                sim_window = get_simulated_window("normal_baseline", n_samples=500)
+                st.session_state.last_window = sim_window
+                return sim_window
+
+            resampled = _resample_window(window, target_samples=500)
+            st.session_state.last_window = resampled
+            return resampled
         st.session_state.io_status = {}
         st.session_state.last_raw = None
-        return get_simulated_window(sim_state or "normal_baseline", n_samples=500)
+        sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=500)
+        st.session_state.last_window = sim_window
+        return sim_window
     except Exception:
+        if st.session_state.get("last_window") is not None:
+            logger.exception("[HW] read failure, reusing last valid window")
+            st.session_state.io_status = {
+                "port": ESP32_PORT_ENV,
+                "ok": False,
+                "reason": "exception_reused_last_window",
+                "collected_samples": 0,
+                "requested_samples": 60,
+                "valid_lines": 0,
+                "invalid_lines": 0,
+                "elapsed_seconds": 0.0,
+                "last_valid_line": "",
+            }
+            return st.session_state.last_window
+
         st.session_state.mode = "simulation"
         logger.exception("[HW] read failure, switching to simulation")
         st.session_state.io_status = {
@@ -192,7 +223,9 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
             "elapsed_seconds": 0.0,
             "last_valid_line": "",
         }
-        return get_simulated_window("normal_baseline", n_samples=500)
+        sim_window = get_simulated_window("normal_baseline", n_samples=500)
+        st.session_state.last_window = sim_window
+        return sim_window
 
 
 def confidence_color(conf: float) -> str:
@@ -919,20 +952,10 @@ def render_sidebar(mode: str, alerts: List[Tuple[str, str]]) -> Tuple[Optional[s
     else:
         st.sidebar.info("Waiting for first reading...")
 
-    st.sidebar.divider()
-    st.sidebar.markdown("### 🔑 Groq API Key")
-    key_input = st.sidebar.text_input(
-        "Groq API Key",
-        type="password",
-        placeholder="Paste API key",
-        label_visibility="collapsed",
-    )
-    st.sidebar.caption("Get free key at console.groq.com")
-
-    if key_input:
-        st.session_state.groq_key = key_input.strip()
-    elif not st.session_state.groq_key and GROQ_API_KEY_ENV:
+    if GROQ_API_KEY_ENV:
         st.session_state.groq_key = GROQ_API_KEY_ENV.strip()
+    else:
+        st.session_state.groq_key = ""
 
     st.sidebar.divider()
     st.sidebar.markdown("### 📋 Active Alerts")

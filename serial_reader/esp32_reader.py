@@ -104,6 +104,8 @@ class ESP32Reader:
 		self._serial: Optional[serial.Serial] = None
 		self.port: Optional[str] = None
 		self.last_raw: Dict[str, float] = {}
+		self._last_valid_gsr: Optional[float] = None
+		self._last_valid_spo2: Optional[float] = None
 		self.last_stats: Dict[str, object] = {
 			"port": None,
 			"requested_samples": 0,
@@ -204,6 +206,20 @@ class ESP32Reader:
 			if data is None:
 				invalid_lines += 1
 				continue
+
+			# Reuse the previous valid GSR sample if current sample appears dropped out.
+			gsr = float(data.get("GSR", 0.0))
+			if gsr <= 1.0 and self._last_valid_gsr is not None:
+				data["GSR"] = self._last_valid_gsr
+			elif gsr > 1.0:
+				self._last_valid_gsr = gsr
+
+			# Treat SpO2 < 85 as no-finger/invalid and reuse prior valid value when possible.
+			spo2 = float(data.get("SPO2", 0.0))
+			if spo2 < 85.0 and self._last_valid_spo2 is not None:
+				data["SPO2"] = self._last_valid_spo2
+			elif spo2 >= 85.0:
+				self._last_valid_spo2 = spo2
 
 			# If valid, call normalize_reading()
 			reading = normalize_reading(data)

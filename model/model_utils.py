@@ -25,6 +25,7 @@ CLASS_COLORS = {
 }
 
 SENSOR_NAMES = ["GSR", "SpO2", "Temp", "Accel"]
+MODEL_WINDOW_SAMPLES = 30
 
 
 @tf.keras.utils.register_keras_serializable()
@@ -97,7 +98,7 @@ class ANSClassifier(tf.keras.Model):
 
 def build_model() -> ANSClassifier:
 	model = ANSClassifier(name="ans_classifier")
-	_ = model(tf.zeros((1, 500, 4), dtype=tf.float32), training=False)
+	_ = model(tf.zeros((1, MODEL_WINDOW_SAMPLES, 4), dtype=tf.float32), training=False)
 	return model
 
 
@@ -134,7 +135,7 @@ def load_or_create_model() -> ANSClassifier:
 		except Exception:
 			pass
 
-	x_dummy = np.random.rand(10, 500, 4).astype(np.float32)
+	x_dummy = np.random.rand(10, MODEL_WINDOW_SAMPLES, 4).astype(np.float32)
 	y_idx = np.random.randint(0, len(CLASSES), size=(10,))
 	y_dummy = tf.keras.utils.to_categorical(y_idx, num_classes=len(CLASSES))
 
@@ -158,8 +159,10 @@ def _round_and_renormalize(weights: np.ndarray) -> Dict[str, float]:
 
 
 def mc_dropout_predict(model: ANSClassifier, window: np.ndarray, T: int = 20) -> Dict[str, object]:
-	if window.shape != (500, 4):
-		raise ValueError(f"Expected window shape (500, 4), got {window.shape}")
+	if window.shape != (MODEL_WINDOW_SAMPLES, 4):
+		raise ValueError(
+			f"Expected window shape ({MODEL_WINDOW_SAMPLES}, 4), got {window.shape}"
+		)
 
 	batch = np.expand_dims(window.astype(np.float32), axis=0)
 	probs_samples = []
@@ -204,8 +207,10 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def compute_pcs(model: ANSClassifier, window: np.ndarray) -> Tuple[float, bool]:
-	if window.shape != (500, 4):
-		raise ValueError(f"Expected window shape (500, 4), got {window.shape}")
+	if window.shape != (MODEL_WINDOW_SAMPLES, 4):
+		raise ValueError(
+			f"Expected window shape ({MODEL_WINDOW_SAMPLES}, 4), got {window.shape}"
+		)
 
 	batch = np.expand_dims(window.astype(np.float32), axis=0)
 	_, pcs_state, cav = model.extract_features(batch, training=False)

@@ -1,4 +1,4 @@
-"""Train ANS classifier on synthetic data."""
+"""Train ANS classifier on hardware-matched normalized ranges."""
 
 from __future__ import annotations
 
@@ -15,29 +15,65 @@ PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
 	sys.path.append(PROJECT_ROOT)
 
-from serial_reader.simulator import get_simulated_window
 from model.model_utils import CLASSES, build_model
 
 
-MODE_BY_CLASS = {
-	0: "normal_baseline",
-	1: "sympathetic_arousal",
-	2: "parasympathetic_suppression",
-	3: "mixed_dysregulation",
+CLASS_RANGES = {
+	"Normal Baseline": {
+		"gsr": (0.10, 0.44),
+		"spo2": (0.60, 0.90),
+		"temp": (0.27, 0.40),
+		"accel": (0.45, 0.55),
+	},
+	"Sympathetic Arousal": {
+		"gsr": (0.49, 0.68),
+		"spo2": (0.30, 0.60),
+		"temp": (0.33, 0.47),
+		"accel": (0.50, 0.75),
+	},
+	"Parasympathetic Suppression": {
+		"gsr": (0.07, 0.17),
+		"spo2": (0.00, 0.30),
+		"temp": (0.27, 0.33),
+		"accel": (0.45, 0.55),
+	},
+	"Mixed Dysregulation": {
+		"gsr": (0.24, 0.61),
+		"spo2": (0.30, 0.70),
+		"temp": (0.33, 0.47),
+		"accel": (0.60, 1.00),
+	},
 }
+
+NOISE_SIGMA = 0.03
+
+
+def _sample_channel(low: float, high: float, n_samples: int) -> np.ndarray:
+	base = np.random.uniform(low, high, size=n_samples).astype(np.float32)
+	noise = np.random.normal(0.0, NOISE_SIGMA, size=n_samples).astype(np.float32)
+	return np.clip(base + noise, 0.0, 1.0)
+
+
+def generate_window(class_name: str, n_samples: int) -> np.ndarray:
+	ranges = CLASS_RANGES[class_name]
+	window = np.zeros((n_samples, 4), dtype=np.float32)
+	window[:, 0] = _sample_channel(*ranges["gsr"], n_samples)
+	window[:, 1] = _sample_channel(*ranges["spo2"], n_samples)
+	window[:, 2] = _sample_channel(*ranges["temp"], n_samples)
+	window[:, 3] = _sample_channel(*ranges["accel"], n_samples)
+	return window
 
 
 def generate_dataset(
-	windows_per_class: int = 600,
-	n_samples: int = 500,
+	windows_per_class: int = 1000,
+	n_samples: int = 30,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	x_data = []
 	y_data = []
 
-	for class_idx in range(len(CLASSES)):
-		mode = MODE_BY_CLASS[class_idx]
+	for class_idx, class_name in enumerate(CLASSES):
 		for _ in range(windows_per_class):
-			x_data.append(get_simulated_window(mode=mode, n_samples=n_samples))
+			x_data.append(generate_window(class_name=class_name, n_samples=n_samples))
 			y_data.append(class_idx)
 
 	x = np.asarray(x_data, dtype=np.float32)
@@ -56,8 +92,8 @@ def main() -> None:
 	np.random.seed(42)
 	tf.random.set_seed(42)
 
-	print("Generating synthetic dataset...")
-	x, y = generate_dataset(windows_per_class=600, n_samples=500)
+	print("Generating hardware-matched dataset...")
+	x, y = generate_dataset(windows_per_class=1000, n_samples=30)
 	print(f"Dataset shape: X={x.shape}, y={y.shape}")
 
 	model = build_model()
@@ -70,7 +106,7 @@ def main() -> None:
 	callbacks = [
 		tf.keras.callbacks.EarlyStopping(
 			monitor="val_accuracy",
-			patience=4,
+			patience=5,
 			restore_best_weights=True,
 		),
 		tf.keras.callbacks.ReduceLROnPlateau(
@@ -81,11 +117,11 @@ def main() -> None:
 		),
 	]
 
-	print("Training model (up to 20 epochs with early stopping)...")
+	print("Training model (up to 30 epochs with early stopping)...")
 	model.fit(
 		x,
 		y,
-		epochs=20,
+		epochs=30,
 		batch_size=32,
 		validation_split=0.2,
 		shuffle=True,

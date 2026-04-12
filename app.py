@@ -16,6 +16,9 @@ import streamlit as st
 from dotenv import load_dotenv
 
 FRAGMENT_SUPPORTED = hasattr(st, "fragment")
+FAST_FRAGMENT_INTERVAL = "2s"
+MODEL_FRAGMENT_INTERVAL = "12s"
+CLINICAL_FRAGMENT_INTERVAL = "90s"
 
 # Session state defaults must be initialized at the top.
 defaults = {
@@ -29,14 +32,25 @@ defaults = {
     "io_status": {},
     "last_raw": None,
     "last_window": None,
+    "normalized_history": [],
     "sensor_history": {
         "readings": [],
         "gsr": [],
         "spo2": [],
         "temp": [],
         "accel": [],
+        "bpm": [],
+        "ecg": [],
+        "ecg_hr": [],
+        "lo": [],
+        "risk": [],
         "state": [],
     },
+    "esp32_reader": None,
+    "last_fast_log_ts": 0.0,
+    "clinical_payload": None,
+    "clinical_context": None,
+    "last_clinical_update": "--:--:--",
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -57,11 +71,12 @@ if PROJECT_ROOT not in sys.path:
 from model.model_utils import (
     CLASS_COLORS,
     CLASSES,
+    MODEL_WINDOW_SAMPLES,
     load_or_create_model,
     mc_dropout_predict,
     compute_pcs,
 )
-from serial_reader.esp32_reader import ESP32Reader, has_device
+from serial_reader.esp32_reader import ESP32Reader, has_device, normalize_reading
 from serial_reader.simulator import get_simulated_window
 from groq_interpreter import get_clinical_interpretation
 
@@ -113,6 +128,30 @@ def load_model():
         return load_or_create_model()
 
 
+def get_session_reader() -> ESP32Reader:
+    reader = st.session_state.get("esp32_reader")
+    if isinstance(reader, ESP32Reader):
+        return reader
+
+    reader = ESP32Reader(
+        read_timeout=0.15,
+        scan_timeout=0.8,
+        preferred_port=ESP32_PORT_ENV,
+    )
+    st.session_state.esp32_reader = reader
+    return reader
+
+
+def close_session_reader() -> None:
+    reader = st.session_state.get("esp32_reader")
+    if isinstance(reader, ESP32Reader):
+        try:
+            reader.close()
+        except Exception:
+            logger.exception("[HW] failed to close session reader")
+    st.session_state.esp32_reader = None
+
+
 def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
     # Always prefer live hardware when it is available, so a previous
     # simulation fallback does not permanently lock the session.
@@ -121,12 +160,13 @@ def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
     if mode == "hardware":
         logger.info("✅ ESP32 CONNECTED on COM3 — Live mode active")
     else:
+        close_session_reader()
         logger.info("⚠️  No hardware — Simulation mode active")
     return mode, None
 
 
-def _resample_window(window: np.ndarray, target_samples: int = 500) -> np.ndarray:
-    """Resample (N,4) window to fixed model shape (500,4)."""
+def _resample_window(window: np.ndarray, target_samples: int = MODEL_WINDOW_SAMPLES) -> np.ndarray:
+    """Resample (N,4) window to fixed model input shape."""
     if window.shape[0] == target_samples:
         return window
 
@@ -148,7 +188,7 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
                 scan_timeout=0.8,
                 preferred_port=ESP32_PORT_ENV,
             )
-            window = reader.read_window(n_samples=60, max_window_seconds=2.5)
+            window = reader.read_window(n_samples=MODEL_WINDOW_SAMPLES, max_window_seconds=2.5)
             stats = dict(reader.last_stats)
             last_raw = dict(reader.last_raw) if reader.last_raw else None
             reader.close()
@@ -182,16 +222,16 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
                     "ok": False,
                     "reason": "fallback_to_simulation",
                 }
-                sim_window = get_simulated_window("normal_baseline", n_samples=500)
+                sim_window = get_simulated_window("normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
                 st.session_state.last_window = sim_window
                 return sim_window
 
-            resampled = _resample_window(window, target_samples=500)
+            resampled = _resample_window(window, target_samples=MODEL_WINDOW_SAMPLES)
             st.session_state.last_window = resampled
             return resampled
         st.session_state.io_status = {}
         st.session_state.last_raw = None
-        sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=500)
+        sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
         st.session_state.last_window = sim_window
         return sim_window
     except Exception:
@@ -202,7 +242,7 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
                 "ok": False,
                 "reason": "exception_reused_last_window",
                 "collected_samples": 0,
-                "requested_samples": 60,
+                "requested_samples": MODEL_WINDOW_SAMPLES,
                 "valid_lines": 0,
                 "invalid_lines": 0,
                 "elapsed_seconds": 0.0,
@@ -217,13 +257,13 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
             "ok": False,
             "reason": "exception_fallback",
             "collected_samples": 0,
-            "requested_samples": 60,
+            "requested_samples": MODEL_WINDOW_SAMPLES,
             "valid_lines": 0,
             "invalid_lines": 0,
             "elapsed_seconds": 0.0,
             "last_valid_line": "",
         }
-        sim_window = get_simulated_window("normal_baseline", n_samples=500)
+        sim_window = get_simulated_window("normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
         st.session_state.last_window = sim_window
         return sim_window
 
@@ -428,7 +468,13 @@ def update_sensor_history(raw: Dict[str, float], state_name: str) -> None:
     ax = float(raw.get("AX", 0.0))
     ay = float(raw.get("AY", 0.0))
     az = float(raw.get("AZ", 0.0))
-    hist["accel"].append(float((ax**2 + ay**2 + az**2) ** 0.5))
+    accel_mag = float((ax**2 + ay**2 + az**2) ** 0.5)
+    hist["accel"].append(accel_mag)
+    hist["bpm"].append(max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0))))
+    hist["ecg"].append(float(raw.get("ECG", 0.0)))
+    hist["ecg_hr"].append(float(raw.get("ECG_HR", 0.0)))
+    hist["lo"].append(int(float(raw.get("LO", 1.0))))
+    hist["risk"].append(int(float(raw.get("RISK", 0.0))))
     hist["state"].append(str(raw.get("STATE", state_name)))
 
     for key in hist:
@@ -530,6 +576,105 @@ def render_live_sensor_activity() -> None:
         accel_now = hist["accel"][-1] if hist["accel"] else 0
         color = "🔴" if accel_now > 2.0 else "🟢"
         st.metric(f"{color} Movement", f"{accel_now:.2f}g", delta=f"{accel_now - hist['accel'][-2]:.2f}" if len(hist["accel"]) > 1 else None)
+
+
+def render_live_sensor_tab() -> None:
+    st.subheader("📈 Live Sensor Monitor")
+    st.caption("Real-time readings from GSR, SpO2, Temp, BPM, and ECG")
+
+    hist = st.session_state.sensor_history
+    if not hist["readings"]:
+        st.info("Waiting for sensor history...")
+        return
+
+    raw = st.session_state.get("last_raw") or {}
+    gsr_now = float(raw.get("GSR", hist["gsr"][-1] if hist["gsr"] else 0.0))
+    spo2_now = float(raw.get("SPO2", hist["spo2"][-1] if hist["spo2"] else 0.0))
+    temp_now = float(raw.get("TEMP", hist["temp"][-1] if hist["temp"] else 0.0))
+    bpm_now = max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0)))
+    accel_now = hist["accel"][-1] if hist["accel"] else 0.0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric(f"{'🔴' if gsr_now > 2000 else '🟢'} GSR", f"{gsr_now:.0f}")
+    with c2:
+        st.metric(f"{'🔴' if 0 < spo2_now < 94 else '🟢'} SpO2", f"{spo2_now:.1f}%")
+    with c3:
+        temp_delta = f"{temp_now - hist['temp'][-2]:.1f}" if len(hist["temp"]) > 1 else None
+        st.metric(f"{'🔴' if temp_now > 37.5 else '🟢'} Temperature", f"{temp_now:.1f}°C", delta=temp_delta)
+    with c4:
+        st.metric(f"{'🔴' if bpm_now > 110 or (0 < bpm_now < 50) else '🟢'} BPM", f"{bpm_now:.0f}")
+    with c5:
+        st.metric(f"{'🔴' if accel_now > 2.0 else '🟢'} Movement", f"{accel_now:.2f}g")
+
+    fig = make_subplots(
+        rows=3,
+        cols=2,
+        specs=[[{}, {}], [{}, {}], [{"colspan": 2}, None]],
+        subplot_titles=(
+            "💧 Skin Conductance",
+            "🫁 Blood Oxygen %",
+            "🌡️ Temperature",
+            "❤️ Heart Rate BPM",
+            "⚡ ECG Waveform",
+        ),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+    )
+
+    x_vals = hist["readings"]
+    fig.add_trace(go.Scatter(x=x_vals, y=hist["gsr"], mode="lines", line=dict(color="#1D9E75", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_vals, y=hist["spo2"], mode="lines", line=dict(color="#378ADD", width=2)), row=1, col=2)
+    fig.add_trace(go.Scatter(x=x_vals, y=hist["temp"], mode="lines", line=dict(color="#EF9F27", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_vals, y=hist["bpm"], mode="lines", line=dict(color="#D85A30", width=2)), row=2, col=2)
+
+    lo_vals = hist.get("lo", [])
+    ecg_vals = hist.get("ecg", [])
+    ecg_plot = []
+    for i, val in enumerate(ecg_vals):
+        lo = lo_vals[i] if i < len(lo_vals) else 1
+        ecg_plot.append(0.0 if lo == 1 else float(val))
+    fig.add_trace(go.Scatter(x=x_vals, y=ecg_plot, mode="lines", line=dict(color="#9B59B6", width=2)), row=3, col=1)
+
+    fig.add_hline(y=2000, line_dash="dash", line_color="red", annotation_text="Alert", row=1, col=1)
+    fig.add_hline(y=94, line_dash="dash", line_color="red", annotation_text="Min Normal", row=1, col=2)
+    fig.add_hline(y=37.5, line_dash="dash", line_color="red", annotation_text="Alert", row=2, col=1)
+    fig.add_hline(y=110, line_dash="dash", line_color="red", annotation_text="High", row=2, col=2)
+    fig.add_hline(y=50, line_dash="dash", line_color="green", annotation_text="Low", row=2, col=2)
+
+    fig.update_layout(
+        height=500,
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="white"),
+        margin=dict(l=30, r=30, t=40, b=20),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.1)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.1)")
+    fig.update_yaxes(range=[0, 4095], row=1, col=1)
+    fig.update_yaxes(range=[85, 100], row=1, col=2)
+    fig.update_yaxes(range=[30, 42], row=2, col=1)
+    fig.update_yaxes(range=[0, 150], row=2, col=2)
+    fig.update_yaxes(range=[0, 4095], row=3, col=1)
+    st.plotly_chart(fig, width="stretch")
+
+    if lo_vals and lo_vals[-1] == 1:
+        st.info("Electrodes not connected")
+
+    gsr_active = "🟢 GSR Active" if gsr_now > 0 else "🔴 GSR Active"
+    spo2_active = "🟢 SpO2 Active" if spo2_now > 0 else "🔴 SpO2 Active"
+    temp_active = "🟢 Temp Active" if temp_now > 0 else "🔴 Temp Active"
+    ecg_active = "🟢 ECG Active" if (lo_vals and lo_vals[-1] == 0 and ecg_vals and ecg_vals[-1] > 0) else "🔴 ECG Active"
+    st.markdown(f"{gsr_active}   {spo2_active}   {temp_active}   {ecg_active}")
+
+    risk_now = int(float(raw.get("RISK", hist["risk"][-1] if hist["risk"] else 0)))
+    state_now = str(raw.get("STATE", hist["state"][-1] if hist["state"] else "NORMAL"))
+    risk_color = "#1D9E75" if risk_now <= 1 else ("#EF9F27" if risk_now == 2 else "#D85A30")
+    st.markdown(
+        f"<span style='background:{risk_color};color:white;padding:6px 12px;border-radius:999px;font-weight:700;'>Hardware Risk Score: {risk_now}/5 — {state_now}</span>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_header(mode: str):
@@ -657,12 +802,17 @@ def render_sensor_section(window: np.ndarray, prediction: dict, display_state: s
 
 def render_clinical_section(clinical_payload: Optional[dict], state_color: str, has_key: bool):
     st.subheader("🤖 AI Clinical Interpretation")
-    st.caption("Generated by Llama 3 • Not a medical diagnosis - For monitoring guidance only")
+    last_ai = st.session_state.get("last_clinical_update", "--:--:--")
+    st.caption(f"Generated by Llama 3 • Last AI refresh: {last_ai} • Not a medical diagnosis")
 
     if not has_key or clinical_payload is None:
+        if not has_key:
+            msg = "Clinical interpretation unavailable — set GROQ_API_KEY in .env and restart the app"
+        else:
+            msg = "Clinical interpretation is being prepared in background. Live graph/model stays real-time."
         st.markdown(
             "<div style='background:#f3f4f6;border:1px solid #d1d5db;border-radius:10px;padding:16px;color:#4b5563;'>"
-            "Clinical interpretation unavailable — add Groq API key in sidebar to enable"
+            f"{msg}"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -1097,36 +1247,368 @@ def render_dashboard_cycle(mode: str, sim_state: Optional[str], groq_key: str, r
             st.error(f"Section failed: {e}")
 
 
+def get_latest_raw_sample(mode: str, sim_state: Optional[str]) -> Optional[Dict[str, float]]:
+    """Fetch one fresh raw sample for fast UI updates without model inference."""
+    try:
+        if mode == "hardware":
+            reader = get_session_reader()
+            # A short burst greatly improves chances of receiving at least one valid line.
+            _ = reader.read_window(n_samples=5, max_window_seconds=1.2)
+            st.session_state.io_status = dict(reader.last_stats)
+            raw = dict(reader.last_raw) if reader.last_raw else None
+            if raw:
+                st.session_state.last_raw = raw
+            return raw
+
+        close_session_reader()
+        sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=1)
+        gsr = float(np.clip(sim_window[0, 0], 0.0, 1.0)) * 4095.0
+        spo2 = 90.0 + float(np.clip(sim_window[0, 1], 0.0, 1.0)) * 10.0
+        temp = 35.0 + float(np.clip(sim_window[0, 2], 0.0, 1.0)) * 5.0
+        accel_mag = float(np.clip(sim_window[0, 3], 0.0, 1.0)) * 2.0
+        sample = {
+            "GSR": gsr,
+            "SPO2": spo2,
+            "TEMP": temp,
+            "AX": accel_mag,
+            "AY": 0.0,
+            "AZ": 0.0,
+            "BPM": 0.0,
+            "ECG": 2048.0,
+            "ECG_HR": 0.0,
+            "LO": 1.0,
+            "RISK": 0,
+            "STATE": "SIM",
+        }
+        st.session_state.last_raw = sample
+        return sample
+    except Exception:
+        logger.exception("[FAST] unable to read latest raw sample")
+        return st.session_state.get("last_raw")
+
+
+def append_normalized_sample(raw: Dict[str, float]) -> None:
+    """Store fast-stream normalized samples for the slow inference fragment."""
+    try:
+        norm = normalize_reading(raw)
+        history = st.session_state.normalized_history
+        history.append(norm.tolist())
+        if len(history) > 800:
+            st.session_state.normalized_history = history[-800:]
+    except Exception:
+        logger.exception("[FAST] failed to normalize fast sample")
+
+
+def hardware_inference_ready() -> Tuple[bool, str]:
+    """Check if live PPG inputs are stable enough for model inference."""
+    raw = st.session_state.get("last_raw") or {}
+    bpm = float(raw.get("BPM", 0.0))
+    spo2 = float(raw.get("SPO2", 0.0))
+
+    # BPM near zero usually means finger is not detected on MAX3010x.
+    if bpm < 40.0:
+        return False, f"BPM too low for valid PPG ({bpm:.1f}). Place finger steadily on sensor."
+    if spo2 < 85.0:
+        return False, f"SpO2 is unstable/too low for reliable inference ({spo2:.1f}%)."
+    return True, ""
+
+
+def build_window_for_inference(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]:
+    """Build model window from fast-stream cache to avoid serial-port contention."""
+    if mode == "hardware":
+        history = st.session_state.get("normalized_history", [])
+        if len(history) >= MODEL_WINDOW_SAMPLES:
+            arr = np.array(history[-MODEL_WINDOW_SAMPLES:], dtype=np.float32)
+            if arr.shape[0] < MODEL_WINDOW_SAMPLES:
+                pad = np.repeat(arr[-1:, :], MODEL_WINDOW_SAMPLES - arr.shape[0], axis=0)
+                arr = np.concatenate([arr, pad], axis=0)
+            st.session_state.last_window = arr
+            return arr
+
+        if st.session_state.get("last_window") is not None:
+            return st.session_state.last_window
+
+        # Avoid a second serial reader in the slow fragment. Wait for fast buffer.
+        return None
+
+    return get_next_window(mode, sim_state)
+
+
+def render_sidebar_live_values() -> None:
+    st.markdown("### 📡 Live Sensor Readings")
+    raw = st.session_state.get("last_raw")
+    if raw:
+        gsr_val = float(raw.get("GSR", 0.0))
+        gsr_color = "🔴" if gsr_val > 2000 else "🟢"
+
+        spo2_val = float(raw.get("SPO2", 0.0))
+        spo2_color = "🔴" if 0 < spo2_val < 94 else "🟢"
+
+        temp_val = float(raw.get("TEMP", 0.0))
+        temp_color = "🔴" if temp_val > 37.5 else "🟢"
+
+        bpm_val = float(raw.get("BPM", 0.0))
+        bpm_color = "🔴" if bpm_val > 110 or (0 < bpm_val < 50) else "🟢"
+
+        st.markdown(
+            f"{gsr_color} **GSR:** {gsr_val:.0f}\n\n"
+            f"{spo2_color} **SpO2:** {spo2_val:.1f}%\n\n"
+            f"{temp_color} **Temp:** {temp_val:.1f}°C\n\n"
+            f"{bpm_color} **BPM:** {bpm_val:.0f}\n\n"
+            f"🔵 **State:** {raw.get('STATE', 'UNKNOWN')}"
+        )
+    else:
+        io = st.session_state.get("io_status", {})
+        if io.get("reason") == "firmware_summary_mode":
+            st.error("ESP32 is connected but not sending GSR/SPO2/TEMP/AX data.")
+            if io.get("last_line"):
+                st.caption(f"Last line from device: {io.get('last_line')}")
+            st.caption("Flash the sensor-stream firmware (GSR,SPO2,TEMP,AX,AY,AZ,BPM) and restart.")
+        else:
+            st.info("Connecting to sensor stream...")
+
+
 def main():
     mode, _ = get_mode_and_sim_state()
-    sim_state, interval, auto_refresh, manual_refresh, groq_key = render_sidebar(mode, st.session_state.current_alerts)
+    render_header(mode)
+    tab1, tab2 = st.tabs([
+        "📈  Live Sensor Monitor",
+        "🧠  AI Analysis",
+    ])
 
-    if manual_refresh:
+    st.sidebar.markdown("### ⚙ Controls")
+    sim_state = None
+    if mode == "simulation":
+        sim_state = st.sidebar.selectbox(
+            "Simulate State:",
+            [
+                "normal_baseline",
+                "sympathetic_arousal",
+                "parasympathetic_suppression",
+                "mixed_dysregulation",
+            ],
+            format_func=lambda x: x.replace("_", " ").title(),
+            key="sim_state_sidebar",
+        )
+
+    if GROQ_API_KEY_ENV:
+        st.session_state.groq_key = GROQ_API_KEY_ENV.strip()
+    else:
+        st.session_state.groq_key = ""
+    groq_key = st.session_state.groq_key
+
+    if not FRAGMENT_SUPPORTED:
+        st.warning("This Streamlit build does not support fragment updates. Upgrade Streamlit to avoid full-page reruns.")
         st.session_state.reading_count += 1
         render_dashboard_cycle(mode, sim_state, groq_key, st.session_state.reading_count)
-        st.caption(f"Manual refresh completed. Auto interval: {interval}s")
         return
 
-    # Use fragment updates when available to avoid full-page flashing.
-    if FRAGMENT_SUPPORTED:
-        run_every = f"{interval}s" if auto_refresh else None
+    @st.fragment(run_every=FAST_FRAGMENT_INTERVAL)
+    def live_sensor_fragment() -> None:
+        raw = get_latest_raw_sample(mode, sim_state)
+        if raw:
+            state_name = raw.get("STATE", "NORMAL")
+            update_sensor_history(raw, str(state_name))
+            append_normalized_sample(raw)
 
-        @st.fragment(run_every=run_every)
-        def live_fragment() -> None:
-            st.session_state.reading_count += 1
-            render_dashboard_cycle(mode, sim_state, groq_key, st.session_state.reading_count)
+            now_ts = time.time()
+            last_log_ts = float(st.session_state.get("last_fast_log_ts", 0.0))
+            if now_ts - last_log_ts >= 5.0:
+                io = st.session_state.get("io_status", {})
+                logger.info(
+                    "[FAST] GSR=%.0f SPO2=%.1f TEMP=%.1f BPM=%.0f ECG=%s ECG_HR=%.0f LO=%s STATE=%s valid=%s invalid=%s reason=%s",
+                    float(raw.get("GSR", 0.0)),
+                    float(raw.get("SPO2", 0.0)),
+                    float(raw.get("TEMP", 0.0)),
+                    max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0))),
+                    str(int(float(raw.get("ECG", 0.0)))),
+                    float(raw.get("ECG_HR", 0.0)),
+                    str(int(float(raw.get("LO", 1.0)))),
+                    str(raw.get("STATE", "?")),
+                    int(io.get("valid_lines", 0)),
+                    int(io.get("invalid_lines", 0)),
+                    str(io.get("reason", "")),
+                )
+                st.session_state.last_fast_log_ts = now_ts
 
-        live_fragment()
-        st.caption(f"Live updates {'enabled' if auto_refresh else 'paused'}. Interval: {interval}s")
-        return
+        with tab1:
+            try:
+                render_live_sensor_tab()
+            except Exception as e:
+                st.error(f"Section failed: {e}")
 
-    st.session_state.reading_count += 1
-    render_dashboard_cycle(mode, sim_state, groq_key, st.session_state.reading_count)
-    st.caption(f"Refresh manually using the sidebar button. Suggested interval: {interval}s")
+    @st.fragment(run_every=FAST_FRAGMENT_INTERVAL)
+    def sidebar_fast_fragment() -> None:
+        render_sidebar_live_values()
+        st.divider()
+        st.markdown("### 🕒 Last Update")
+        ts = datetime.now().strftime("%H:%M:%S")
+        st.caption(f"Fast stream tick: {ts}")
 
-    if auto_refresh:
-        time.sleep(interval)
-        st.rerun()
+    @st.fragment(run_every=MODEL_FRAGMENT_INTERVAL)
+    def model_inference_fragment() -> None:
+        model = load_model()
+        window = build_window_for_inference(mode, sim_state)
+        if window is None:
+            io = st.session_state.get("io_status", {})
+            if io.get("reason") == "firmware_summary_mode":
+                st.error("Inference paused: ESP32 firmware is sending only summary lines (RISK/STATE).")
+                if io.get("last_line"):
+                    st.caption(f"Last line from device: {io.get('last_line')}")
+                st.caption("Upload the full sensor telemetry firmware, then refresh this page.")
+            else:
+                st.info("Collecting live sensor samples for inference...")
+            return
+
+        if mode == "hardware":
+            ready, reason = hardware_inference_ready()
+            if not ready:
+                raw = st.session_state.get("last_raw") or {}
+                st.warning(f"Inference paused: {reason}")
+                logger.info(
+                    "[MODEL] skipped inference | reason=%s | raw_bpm=%.1f | raw_spo2=%.1f",
+                    reason,
+                    float(raw.get("BPM", 0.0)),
+                    float(raw.get("SPO2", 0.0)),
+                )
+                return
+
+        prediction = mc_dropout_predict(model, window, T=6)
+        pcs, sensor_conflict = compute_pcs(model, window)
+
+        display_state = prediction["predicted_class"]
+        if mode == "simulation" and sim_state in SIM_TO_CLASS:
+            display_state = SIM_TO_CLASS[sim_state]
+
+        alerts = get_alerts(prediction, sensor_conflict, state_override=display_state)
+        st.session_state.current_alerts = alerts
+        validation = run_signal_validation(window, sensor_conflict)
+        clinical_payload = st.session_state.get("clinical_payload")
+
+        st.session_state.reading_count += 1
+        snapshot = {
+            **prediction,
+            "display_state": display_state,
+            "pcs": pcs,
+            "sensor_conflict": sensor_conflict,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+        }
+        st.session_state.last_result = snapshot
+        st.session_state.last_validation = validation
+        st.session_state.history.append(snapshot)
+        if len(st.session_state.history) > 20:
+            st.session_state.history = st.session_state.history[-20:]
+        st.session_state.clinical_context = {
+            "predicted_class": display_state,
+            "confidence": float(prediction["confidence"]),
+            "cav_dict": dict(prediction["cav"]),
+            "pcs_score": float(pcs),
+            "sensor_conflict": bool(sensor_conflict),
+            "low_confidence": bool(prediction["low_confidence"]),
+        }
+
+        # Structured terminal logs for fragment inference cycles.
+        count = st.session_state.reading_count
+        logger.info(
+            "📊 Reading #%s | State: %s | Confidence: %.1f%% | Dominant: %s | PCS: %.2f | Quality: %s/100",
+            count,
+            prediction["predicted_class"],
+            float(prediction["confidence"]),
+            prediction["dominant_sensor"],
+            float(pcs),
+            int(validation["signal_quality_score"]),
+        )
+        if sensor_conflict:
+            logger.warning("⚠️ SENSOR CONFLICT — PCS=%.2f below threshold 0.30", float(pcs))
+        if prediction["low_confidence"]:
+            logger.warning("❓ LOW CONFIDENCE — variance=%.4f > 0.12", float(prediction["variance"]))
+        if prediction["predicted_class"] in ("Sympathetic Arousal", "Mixed Dysregulation") and prediction["confidence"] >= 75:
+            logger.warning(
+                "🚨 ALERT — %s detected at %.1f%% confidence",
+                prediction["predicted_class"],
+                float(prediction["confidence"]),
+            )
+
+        if not groq_key:
+            logger.info("🤖 AI interpretation disabled: GROQ_API_KEY is not set")
+        elif clinical_payload is None:
+            logger.info("🤖 AI interpretation pending background refresh")
+        else:
+            logger.info(
+                "🤖 AI interpretation ready | urgency=%s",
+                str(clinical_payload.get("urgency", "monitor")),
+            )
+
+        with tab2:
+            try:
+                render_main_state_card(prediction, pcs, sensor_conflict, display_state)
+                render_sensor_section(window, prediction, display_state)
+                render_clinical_section(
+                    clinical_payload,
+                    CLASS_COLORS.get(display_state, "#333333"),
+                    bool(groq_key),
+                )
+                render_integrity_section(prediction, validation)
+                render_history_section()
+            except Exception as e:
+                st.error(f"Section failed: {e}")
+
+    @st.fragment(run_every=CLINICAL_FRAGMENT_INTERVAL)
+    def clinical_refresh_fragment() -> None:
+        if not groq_key:
+            return
+        ctx = st.session_state.get("clinical_context")
+        if not ctx:
+            return
+
+        start = time.time()
+        payload = get_clinical_interpretation(
+            predicted_class=ctx["predicted_class"],
+            confidence=ctx["confidence"],
+            cav_dict=ctx["cav_dict"],
+            pcs_score=ctx["pcs_score"],
+            sensor_conflict=ctx["sensor_conflict"],
+            low_confidence=ctx["low_confidence"],
+            api_key=groq_key,
+        )
+        elapsed = time.time() - start
+        if payload:
+            st.session_state.clinical_payload = payload
+            st.session_state.last_clinical_update = datetime.now().strftime("%H:%M:%S")
+            logger.info("🤖 AI interpretation refreshed in %.2fs", elapsed)
+        else:
+            logger.warning("🤖 AI interpretation refresh failed after %.2fs", elapsed)
+
+    @st.fragment(run_every=MODEL_FRAGMENT_INTERVAL)
+    def sidebar_slow_fragment() -> None:
+        alerts = st.session_state.get("current_alerts", [])
+        st.divider()
+        st.markdown("### 📋 Active Alerts")
+        if alerts:
+            for level, message in alerts:
+                if level == "error":
+                    st.error(message)
+                elif level == "warning":
+                    st.warning(message)
+                else:
+                    st.info(message)
+        else:
+            st.success("No active alerts")
+
+        st.divider()
+        st.markdown("### 🕒 Last Inference")
+        last_result = st.session_state.get("last_result")
+        if last_result:
+            st.caption(f"{last_result.get('timestamp', '--:--:--')} (12s cycle)")
+        else:
+            st.caption("--:--:-- (12s cycle)")
+
+    live_sensor_fragment()
+    model_inference_fragment()
+    clinical_refresh_fragment()
+    with st.sidebar:
+        sidebar_fast_fragment()
+        sidebar_slow_fragment()
 
 
 if __name__ == "__main__":

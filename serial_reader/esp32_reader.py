@@ -13,6 +13,8 @@ from serial.tools import list_ports
 
 logger = logging.getLogger(__name__)
 
+_LAST_GSR: float = 1000.0
+
 
 # ESP32 ADC commonly reports 0-4095 (12-bit). Keep parser tolerant to both
 # legacy 0-1023 and 12-bit firmware output.
@@ -46,7 +48,7 @@ def parse_line(line):
 		for part in parts:
 			if ":" in part:
 				key, val = part.split(":", 1)
-				key = key.strip()
+				key = key.strip().upper()
 				val = val.strip()
 				if key == "STATE":
 					data[key] = val
@@ -65,24 +67,38 @@ def parse_line(line):
 
 
 def normalize_reading(data):
-	# Normalize to 0-1 range
-	gsr_norm = min(data.get("GSR", 0) / 4095.0, 1.0)
-
-	spo2_raw = data.get("SPO2", 0)
-	# If SPO2 is 0 (no finger) use 0.5 as neutral
-	if spo2_raw < 1:
-		spo2_norm = 0.5
+	"""Normalize raw reading to model channels [GSR, SpO2, Temp, Accel]."""
+	global _LAST_GSR
+	gsr_raw = float(data.get("GSR", 0.0))
+	if gsr_raw < 10.0:
+		gsr_raw = _LAST_GSR
 	else:
-		spo2_norm = max(0, min((spo2_raw - 90) / 10.0, 1.0))
+		_LAST_GSR = gsr_raw
+	gsr_norm = min(gsr_raw / 4095.0, 1.0)
 
-	temp_raw = data.get("TEMP", 36.5)
-	temp_norm = max(0, min((temp_raw - 35.0) / 5.0, 1.0))
+	spo2_raw = float(data.get("SPO2", 0.0))
+	if spo2_raw < 85.0:
+		spo2_norm = 0.80
+	else:
+		spo2_norm = max(0.0, min((spo2_raw - 90.0) / 10.0, 1.0))
 
-	ax = data.get("AX", 0)
-	ay = data.get("AY", 0)
-	az = data.get("AZ", 0)
+	temp_raw = float(data.get("TEMP", 35.0))
+	temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))
+
+	ax = float(data.get("AX", 0.0))
+	ay = float(data.get("AY", 0.0))
+	az = float(data.get("AZ", 0.0))
 	accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
 	accel_norm = min(accel_mag / 2.0, 1.0)
+
+	# ECG is display-only and does not enter the 4-channel model input.
+	ecg_raw = float(data.get("ECG", 2048.0))
+	lo_off = int(float(data.get("LO", 1.0)))
+	if lo_off == 1 or ecg_raw == 0.0:
+		ecg_norm = 0.5
+	else:
+		ecg_norm = max(0.0, min(ecg_raw / 4095.0, 1.0))
+	data["ECG_NORM"] = ecg_norm
 
 	return np.array([
 		gsr_norm, spo2_norm, temp_norm, accel_norm
@@ -104,6 +120,7 @@ class ESP32Reader:
 		self._serial: Optional[serial.Serial] = None
 		self.port: Optional[str] = None
 		self.last_raw: Dict[str, float] = {}
+		self.last_gsr: float = 1000.0
 		self._last_valid_gsr: Optional[float] = None
 		self._last_valid_spo2: Optional[float] = None
 		self.last_stats: Dict[str, object] = {
@@ -112,10 +129,12 @@ class ESP32Reader:
 			"collected_samples": 0,
 			"valid_lines": 0,
 			"invalid_lines": 0,
+			"summary_lines": 0,
 			"elapsed_seconds": 0.0,
 			"ok": False,
 			"reason": "not_started",
 			"last_valid_line": "",
+			"last_line": "",
 		}
 
 	def _detect_and_open(self) -> serial.Serial:
@@ -168,7 +187,42 @@ class ESP32Reader:
 			self._serial.close()
 		self._serial = None
 
-	def read_window(self, n_samples: int = 60, max_window_seconds: float = 2.5) -> Optional[np.ndarray]:
+	def normalize_reading(self, data):
+		gsr_raw = float(data.get("GSR", 0.0))
+		if gsr_raw < 10.0:
+			gsr_raw = float(self.last_gsr)
+		else:
+			self.last_gsr = gsr_raw
+		gsr_norm = min(gsr_raw / 4095.0, 1.0)
+
+		spo2_raw = float(data.get("SPO2", 0.0))
+		if spo2_raw < 85.0:
+			spo2_norm = 0.80
+		else:
+			spo2_norm = max(0.0, min((spo2_raw - 90.0) / 10.0, 1.0))
+
+		temp_raw = float(data.get("TEMP", 35.0))
+		temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))
+
+		ax = float(data.get("AX", 0.0))
+		ay = float(data.get("AY", 0.0))
+		az = float(data.get("AZ", 0.0))
+		mag = (ax**2 + ay**2 + az**2) ** 0.5
+		accel_norm = min(mag / 2.0, 1.0)
+
+		ecg_raw = float(data.get("ECG", 2048.0))
+		lo_off = int(float(data.get("LO", 1.0)))
+		if lo_off == 1 or ecg_raw == 0.0:
+			ecg_norm = 0.5
+		else:
+			ecg_norm = max(0.0, min(ecg_raw / 4095.0, 1.0))
+		data["ECG_NORM"] = ecg_norm
+
+		return np.array([
+			gsr_norm, spo2_norm, temp_norm, accel_norm
+		], dtype=np.float32)
+
+	def read_window(self, n_samples: int = 30, max_window_seconds: float = 2.5) -> Optional[np.ndarray]:
 		"""Read serial stream and return normalized shape (n_samples, 4)."""
 		try:
 			conn = self.connect()
@@ -179,31 +233,41 @@ class ESP32Reader:
 				"collected_samples": 0,
 				"valid_lines": 0,
 				"invalid_lines": 0,
+				"summary_lines": 0,
 				"elapsed_seconds": 0.0,
 				"ok": False,
 				"reason": "serial_not_found",
 				"last_valid_line": "",
+				"last_line": "",
 			}
 			return None
 
 		readings = []
 		valid_lines = 0
 		invalid_lines = 0
+		summary_lines = 0
 		attempts = 0
 		last_valid_line = ""
+		last_line = ""
 		start_time = time.time()
+		deadline = start_time + float(max_window_seconds)
 
 		# Read lines from serial one by one
-		while len(readings) < n_samples and attempts < 120:
+		while len(readings) < n_samples and attempts < 120 and time.time() < deadline:
 			attempts += 1
 			raw_line = conn.readline()
 			if not raw_line:
 				invalid_lines += 1
 				continue
 			line = raw_line.decode("utf-8", errors="ignore")
+			line_stripped = line.strip()
+			if line_stripped:
+				last_line = line_stripped
 			# For each line call parse_line()
 			data = parse_line(line)
 			if data is None:
+				if "STATE:" in line_stripped and "RISK:" in line_stripped:
+					summary_lines += 1
 				invalid_lines += 1
 				continue
 
@@ -214,15 +278,17 @@ class ESP32Reader:
 			elif gsr > 1.0:
 				self._last_valid_gsr = gsr
 
-			# Treat SpO2 < 85 as no-finger/invalid and reuse prior valid value when possible.
+			# Treat SpO2 == 0 as no-finger without dropping the frame.
+			# Keep prior valid SpO2 when available; otherwise preserve 0 and let
+			# normalize_reading() map it to a neutral value.
 			spo2 = float(data.get("SPO2", 0.0))
-			if spo2 < 85.0 and self._last_valid_spo2 is not None:
+			if spo2 < 1.0 and self._last_valid_spo2 is not None:
 				data["SPO2"] = self._last_valid_spo2
 			elif spo2 >= 85.0:
 				self._last_valid_spo2 = spo2
 
-			# If valid, call normalize_reading()
-			reading = normalize_reading(data)
+			# If valid, normalize and keep raw fields (including ECG fields) for UI.
+			reading = self.normalize_reading(data)
 			readings.append(reading)
 			valid_lines += 1
 			last_valid_line = line.strip()
@@ -243,7 +309,7 @@ class ESP32Reader:
 		if len(readings) == 0:
 			fallback = np.array([0.5, 0.5, 0.5, 0.0], dtype=np.float32)
 			readings = [fallback for _ in range(n_samples)]
-			reason = "no_valid_samples"
+			reason = "firmware_summary_mode" if summary_lines > 0 else "no_valid_samples"
 			ok = False
 		elif len(readings) < n_samples:
 			last_valid = readings[-1]
@@ -262,10 +328,12 @@ class ESP32Reader:
 			"collected_samples": int(len(readings)),
 			"valid_lines": int(valid_lines),
 			"invalid_lines": int(invalid_lines),
+			"summary_lines": int(summary_lines),
 			"elapsed_seconds": round(float(time.time() - start_time), 3),
 			"ok": bool(ok),
 			"reason": reason,
 			"last_valid_line": last_valid_line,
+			"last_line": last_line,
 		}
 		return window
 

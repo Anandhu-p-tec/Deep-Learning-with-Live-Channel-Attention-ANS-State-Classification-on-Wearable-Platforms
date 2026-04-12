@@ -20,32 +20,32 @@ from model.model_utils import CLASSES, build_model
 
 CLASS_RANGES = {
 	"Normal Baseline": {
-		"gsr": (0.10, 0.44),
+		"gsr": (0.20, 0.45),
 		"spo2": (0.60, 0.90),
-		"temp": (0.27, 0.40),
+		"temp": (0.30, 0.42),
 		"accel": (0.45, 0.55),
 	},
 	"Sympathetic Arousal": {
-		"gsr": (0.49, 0.68),
-		"spo2": (0.30, 0.60),
-		"temp": (0.33, 0.47),
+		"gsr": (0.50, 0.70),
+		"spo2": (0.33, 0.60),
+		"temp": (0.35, 0.50),
 		"accel": (0.50, 0.75),
 	},
 	"Parasympathetic Suppression": {
-		"gsr": (0.07, 0.17),
-		"spo2": (0.00, 0.30),
-		"temp": (0.27, 0.33),
+		"gsr": (0.05, 0.20),
+		"spo2": (0.00, 0.33),
+		"temp": (0.27, 0.36),
 		"accel": (0.45, 0.55),
 	},
 	"Mixed Dysregulation": {
-		"gsr": (0.24, 0.61),
-		"spo2": (0.30, 0.70),
-		"temp": (0.33, 0.47),
+		"gsr": (0.45, 0.68),
+		"spo2": (0.20, 0.60),
+		"temp": (0.38, 0.55),
 		"accel": (0.60, 1.00),
 	},
 }
 
-NOISE_SIGMA = 0.03
+NOISE_SIGMA = 0.025
 
 
 def _sample_channel(low: float, high: float, n_samples: int) -> np.ndarray:

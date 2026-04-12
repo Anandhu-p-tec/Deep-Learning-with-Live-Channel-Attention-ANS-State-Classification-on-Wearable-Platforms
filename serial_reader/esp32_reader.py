@@ -70,17 +70,17 @@ def normalize_reading(data):
 	"""Normalize raw reading to model channels [GSR, SpO2, Temp, Accel]."""
 	global _LAST_GSR
 	gsr_raw = float(data.get("GSR", 0.0))
-	if gsr_raw < 10.0:
+	if gsr_raw < 50.0:
 		gsr_raw = _LAST_GSR
 	else:
 		_LAST_GSR = gsr_raw
 	gsr_norm = min(gsr_raw / 4095.0, 1.0)
 
 	spo2_raw = float(data.get("SPO2", 0.0))
-	if spo2_raw < 85.0:
-		spo2_norm = 0.80
+	if spo2_raw < 1.0:
+		spo2_norm = 0.75
 	else:
-		spo2_norm = max(0.0, min((spo2_raw - 90.0) / 10.0, 1.0))
+		spo2_norm = max(0.0, min((spo2_raw - 85.0) / 15.0, 1.0))
 
 	temp_raw = float(data.get("TEMP", 35.0))
 	temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))
@@ -189,17 +189,17 @@ class ESP32Reader:
 
 	def normalize_reading(self, data):
 		gsr_raw = float(data.get("GSR", 0.0))
-		if gsr_raw < 10.0:
+		if gsr_raw < 50.0:
 			gsr_raw = float(self.last_gsr)
 		else:
 			self.last_gsr = gsr_raw
 		gsr_norm = min(gsr_raw / 4095.0, 1.0)
 
 		spo2_raw = float(data.get("SPO2", 0.0))
-		if spo2_raw < 85.0:
-			spo2_norm = 0.80
+		if spo2_raw < 1.0:
+			spo2_norm = 0.75
 		else:
-			spo2_norm = max(0.0, min((spo2_raw - 90.0) / 10.0, 1.0))
+			spo2_norm = max(0.0, min((spo2_raw - 85.0) / 15.0, 1.0))
 
 		temp_raw = float(data.get("TEMP", 35.0))
 		temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))

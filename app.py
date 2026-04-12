@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -482,6 +483,36 @@ def update_sensor_history(raw: Dict[str, float], state_name: str) -> None:
             hist[key] = hist[key][-30:]
 
 
+def _last_nonzero(values: List[float], default: float = 0.0) -> float:
+    for v in reversed(values):
+        if float(v) > 0.0:
+            return float(v)
+    return float(default)
+
+
+def _median_recent(values: List[float], k: int = 5, default: float = 0.0) -> float:
+    if not values:
+        return float(default)
+    tail = values[-k:]
+    return float(np.median(np.asarray(tail, dtype=np.float32)))
+
+
+def _majority_recent(values: List[str], k: int = 5, default: str = "NORMAL") -> str:
+    if not values:
+        return default
+    tail = [str(v) for v in values[-k:]]
+    return Counter(tail).most_common(1)[0][0]
+
+
+def _effective_bpm(raw: Dict[str, float], hist: Dict[str, List[float]]) -> float:
+    bpm_raw = float(raw.get("BPM", 0.0))
+    ecg_hr_raw = float(raw.get("ECG_HR", 0.0))
+    current = max(bpm_raw, ecg_hr_raw)
+    if current > 0:
+        return current
+    return _median_recent(hist.get("bpm", []), k=5, default=0.0)
+
+
 def render_live_sensor_activity() -> None:
     st.subheader("📈 Live Sensor Activity")
     st.caption("Real-time readings from all 4 channels — last 30 seconds")
@@ -589,10 +620,16 @@ def render_live_sensor_tab() -> None:
 
     raw = st.session_state.get("last_raw") or {}
     gsr_now = float(raw.get("GSR", hist["gsr"][-1] if hist["gsr"] else 0.0))
+    if gsr_now <= 0.0:
+        gsr_now = _last_nonzero(hist.get("gsr", []), default=0.0)
     spo2_now = float(raw.get("SPO2", hist["spo2"][-1] if hist["spo2"] else 0.0))
+    if spo2_now <= 0.0:
+        spo2_now = _last_nonzero(hist.get("spo2", []), default=0.0)
     temp_now = float(raw.get("TEMP", hist["temp"][-1] if hist["temp"] else 0.0))
-    bpm_now = max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0)))
-    accel_now = hist["accel"][-1] if hist["accel"] else 0.0
+    if temp_now <= 0.0:
+        temp_now = _last_nonzero(hist.get("temp", []), default=0.0)
+    bpm_now = _effective_bpm(raw, hist)
+    accel_now = _median_recent(hist.get("accel", []), k=5, default=0.0)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -668,8 +705,8 @@ def render_live_sensor_tab() -> None:
     ecg_active = "🟢 ECG Active" if (lo_vals and lo_vals[-1] == 0 and ecg_vals and ecg_vals[-1] > 0) else "🔴 ECG Active"
     st.markdown(f"{gsr_active}   {spo2_active}   {temp_active}   {ecg_active}")
 
-    risk_now = int(float(raw.get("RISK", hist["risk"][-1] if hist["risk"] else 0)))
-    state_now = str(raw.get("STATE", hist["state"][-1] if hist["state"] else "NORMAL"))
+    risk_now = int(round(_median_recent(hist.get("risk", []), k=5, default=float(raw.get("RISK", 0.0)))))
+    state_now = _majority_recent(hist.get("state", []), k=5, default=str(raw.get("STATE", "NORMAL")))
     risk_color = "#1D9E75" if risk_now <= 1 else ("#EF9F27" if risk_now == 2 else "#D85A30")
     st.markdown(
         f"<span style='background:{risk_color};color:white;padding:6px 12px;border-radius:999px;font-weight:700;'>Hardware Risk Score: {risk_now}/5 — {state_now}</span>",
@@ -1302,12 +1339,12 @@ def append_normalized_sample(raw: Dict[str, float]) -> None:
 def hardware_inference_ready() -> Tuple[bool, str]:
     """Check if live PPG inputs are stable enough for model inference."""
     raw = st.session_state.get("last_raw") or {}
-    bpm = float(raw.get("BPM", 0.0))
+    bpm = max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0)))
     spo2 = float(raw.get("SPO2", 0.0))
 
     # BPM near zero usually means finger is not detected on MAX3010x.
     if bpm < 40.0:
-        return False, f"BPM too low for valid PPG ({bpm:.1f}). Place finger steadily on sensor."
+        return False, f"Heart rate too low for valid inference ({bpm:.1f})."
     if spo2 < 85.0:
         return False, f"SpO2 is unstable/too low for reliable inference ({spo2:.1f}%)."
     return True, ""
@@ -1338,16 +1375,25 @@ def render_sidebar_live_values() -> None:
     st.markdown("### 📡 Live Sensor Readings")
     raw = st.session_state.get("last_raw")
     if raw:
+        hist = st.session_state.get("sensor_history", {})
         gsr_val = float(raw.get("GSR", 0.0))
+        if gsr_val <= 0.0:
+            gsr_val = _last_nonzero(hist.get("gsr", []), default=0.0)
         gsr_color = "🔴" if gsr_val > 2000 else "🟢"
 
         spo2_val = float(raw.get("SPO2", 0.0))
+        if spo2_val <= 0.0:
+            spo2_val = _last_nonzero(hist.get("spo2", []), default=0.0)
         spo2_color = "🔴" if 0 < spo2_val < 94 else "🟢"
 
         temp_val = float(raw.get("TEMP", 0.0))
+        if temp_val <= 0.0:
+            temp_val = _last_nonzero(hist.get("temp", []), default=0.0)
         temp_color = "🔴" if temp_val > 37.5 else "🟢"
 
-        bpm_val = float(raw.get("BPM", 0.0))
+        bpm_val = max(float(raw.get("BPM", 0.0)), float(raw.get("ECG_HR", 0.0)))
+        if bpm_val <= 0.0:
+            bpm_val = _median_recent(hist.get("bpm", []), k=5, default=0.0)
         bpm_color = "🔴" if bpm_val > 110 or (0 < bpm_val < 50) else "🟢"
 
         st.markdown(

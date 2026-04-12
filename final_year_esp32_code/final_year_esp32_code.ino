@@ -40,6 +40,8 @@ bool  fingerOn         = false;
 float spo2             = 0;
 float bpm              = 0;
 
+const int ECG_PEAK_THRESHOLD = 2500;
+
 // ═══════════════════════════════════════════════
 //  AD8232 ECG — Smart filtered
 // ═══════════════════════════════════════════════
@@ -56,6 +58,11 @@ int   dynamicMin       = 1500;
 long  lastThreshUpdate = 0;
 int   hrECGBuffer[5]   = {0};
 int   hrECGIndex       = 0;
+
+const byte GSR_SMOOTH = 8;
+int gsrBuffer[8] = {1000,1000,1000,1000,1000,1000,1000,1000};
+byte gsrIdx = 0;
+int gsrSmoothed = 1000;
 
 // ═══════════════════════════════════════════════
 //  OTHER SENSORS
@@ -119,9 +126,9 @@ void setup() {
 float estimateSpO2(long ir, long red) {
   if (ir < 100000) return 0;
   float r   = (float)red / (float)ir;
-  float est = 104.0 - 17.0 * r;
+  float est = 110.0 - 25.0 * r;
   if (est > 100) est = 100;
-  if (est < 90)  est = 90;
+  if (est < 85)  est = 85;
   return est;
 }
 
@@ -164,20 +171,13 @@ void updateDynamicThreshold(int val) {
 //  ECG — SMART BEAT DETECTION
 // ═══════════════════════════════════════════════
 int detectECGHeartRate(int smoothed) {
-  updateDynamicThreshold(smoothed);
-
-  int range     = dynamicPeak - dynamicMin;
-  int threshold = dynamicMin + (int)(range * 0.7);
-
-  if (range < 50) return ecgHR;
-
-  if (smoothed > threshold && !abovePeak) {
+  if (smoothed > ECG_PEAK_THRESHOLD && !abovePeak) {
     abovePeak     = true;
     long now      = millis();
     long interval = now - lastPeakTime;
     lastPeakTime  = now;
 
-    if (interval > 300 && interval < 1500) {
+    if (interval > 300 && interval < 2000) {
       int newHR = (int)(60000.0 / interval);
       hrECGBuffer[hrECGIndex] = newHR;
       hrECGIndex = (hrECGIndex + 1) % 5;
@@ -190,7 +190,7 @@ int detectECGHeartRate(int smoothed) {
       }
       if (count > 0) ecgHR = sum / count;
     }
-  } else if (smoothed <= threshold) {
+  } else if (smoothed < ECG_PEAK_THRESHOLD) {
     abovePeak = false;
   }
   return ecgHR;
@@ -268,8 +268,18 @@ void loop() {
   if (millis() - lastReportTime > 100) {
     lastReportTime = millis();
 
-    // GSR
-    gsr = analogRead(GSR_PIN);
+    // GSR with smoothing / dropout rejection
+    int gsrRaw = analogRead(GSR_PIN);
+    if (gsrRaw > 50) {
+      gsrBuffer[gsrIdx] = gsrRaw;
+      gsrIdx = (gsrIdx + 1) % GSR_SMOOTH;
+      long sum = 0;
+      for (byte i = 0; i < GSR_SMOOTH; i++) {
+        sum += gsrBuffer[i];
+      }
+      gsrSmoothed = sum / GSR_SMOOTH;
+    }
+    gsr = gsrSmoothed;
 
     // MPU6050
     int16_t ax, ay, az;

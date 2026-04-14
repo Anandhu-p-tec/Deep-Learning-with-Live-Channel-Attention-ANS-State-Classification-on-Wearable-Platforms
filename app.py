@@ -70,6 +70,7 @@ defaults = {
         "risk": [],
         "state": [],
     },
+    "stream_index": 0,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -540,7 +541,9 @@ def update_sensor_history(raw: Dict[str, float], state_name: str) -> None:
 def append_stream_buffer(raw: Dict[str, float], state_name: str) -> None:
     """Append one sample to 60-point rolling stream buffer for live tab charts."""
     buf = st.session_state.stream_buffer
-    buf["readings"].append(len(buf["readings"]) + 1)
+    # Keep a monotonic x-axis index; do not derive from truncated buffer length.
+    st.session_state.stream_index = int(st.session_state.get("stream_index", 0)) + 1
+    buf["readings"].append(st.session_state.stream_index)
     buf["gsr"].append(float(raw.get("GSR", 0.0)))
     buf["spo2"].append(float(raw.get("SPO2", 0.0)))
     buf["temp"].append(float(raw.get("TEMP", 0.0)))
@@ -1781,7 +1784,8 @@ def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
         st.sidebar.success("No active alerts")
 
     st.sidebar.divider()
-    interval = st.sidebar.slider("Update interval (seconds)", 2, 10, 3)
+    # Reduce default update interval from 3s to 1.5s for more responsive updates
+    interval = st.sidebar.slider("Update interval (seconds)", 1, 5, 1)
 
     return sim_state, interval, st.session_state.groq_key
 
@@ -1948,22 +1952,11 @@ def main():
                 )
                 logger.info(f"[MAIN] AI tab rendered successfully")
 
-    # AUTO-REFRESH: Use session state counter and timer to force continuous reruns
-    if "rerun_counter" not in st.session_state:
-        st.session_state.rerun_counter = 0
-    if "last_rerun_time" not in st.session_state:
-        st.session_state.last_rerun_time = time.time()
-    
-    # Trigger rerun every interval seconds by checking elapsed time
-    elapsed = time.time() - st.session_state.last_rerun_time
-    logger.info(f"[MAIN] Rerun check: interval={interval}s, elapsed={elapsed:.2f}s, counter={st.session_state.rerun_counter}, will_rerun={elapsed >= interval}")
-    
-    # FORCE RERUN using a placeholder with a key that increments
-    if elapsed >= interval:
-        st.session_state.rerun_counter += 1
-        st.session_state.last_rerun_time = time.time()
-        logger.info(f"[MAIN] Triggering aggressive rerun #{st.session_state.rerun_counter}")
-        st.rerun()
+    # Deterministic refresh loop so data collection and inference continue without clicks.
+    logger.info(f"[MAIN] Sleeping {interval}s before next rerun")
+    time.sleep(interval)
+    logger.info("[MAIN] Triggering timed rerun")
+    st.rerun()
 
 
 if __name__ == "__main__":

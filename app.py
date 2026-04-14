@@ -1908,6 +1908,15 @@ def main():
                     groq_key,
                 )
 
+    # AUTO-REFRESH: Trigger periodic reruns to fetch fresh data from background thread
+    # This ensures UI updates continuously without user interaction
+    with st.empty():
+        placeholder = st.empty()
+        # Use the sidebar interval setting (2-10 seconds) to control refresh rate
+        time.sleep(interval)
+        placeholder.text("")  # Clear placeholder
+        st.rerun()
+
 
 if __name__ == "__main__":
     main()

@@ -1531,15 +1531,17 @@ def render_dashboard_cycle(mode: str, sim_state: Optional[str], groq_key: str, r
 def get_latest_raw_sample(mode: str, sim_state: Optional[str]) -> Optional[Dict[str, float]]:
     """Fetch one fresh raw sample for fast UI updates without model inference."""
     try:
-        if mode == "hardware":
-            reader = st.session_state.get("serial_reader")
-            if reader and reader.connected:
-                raw = reader.get_latest()
-                if raw:
-                    st.session_state.last_raw = raw
-                    return raw
+        # Always check if hardware is actually connected, not just the mode variable
+        reader = st.session_state.get("serial_reader")
+        is_live = reader is not None and reader.connected
+        
+        if is_live:
+            raw = reader.get_latest()
+            if raw:
+                st.session_state.last_raw = raw
+                return raw
 
-        # Fallback to simulator
+        # Fallback to simulator if no hardware or no data available yet
         sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=1)
         gsr = float(np.clip(sim_window[0, 0], 0.0, 1.0)) * 4095.0
         spo2 = 90.0 + float(np.clip(sim_window[0, 1], 0.0, 1.0)) * 10.0
@@ -1594,7 +1596,11 @@ def hardware_inference_ready() -> Tuple[bool, str]:
 
 def build_window_for_inference(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]:
     """Build model window from fast-stream cache to avoid serial-port contention."""
-    if mode == "hardware":
+    # Dynamically check if hardware is actually connected
+    reader = st.session_state.get("serial_reader")
+    is_live = reader is not None and reader.connected
+    
+    if is_live:
         history = st.session_state.get("normalized_history", [])
         if len(history) >= MODEL_WINDOW_SAMPLES:
             arr = np.array(history[-MODEL_WINDOW_SAMPLES:], dtype=np.float32)
@@ -1664,7 +1670,11 @@ def render_sidebar_live_values() -> None:
 
 def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
     st.sidebar.markdown("### Connection")
-    if mode == "hardware":
+    # Dynamically check if hardware is actually connected (not just mode-based)
+    reader = st.session_state.get("serial_reader")
+    is_live = reader is not None and reader.connected
+    
+    if is_live:
         st.sidebar.success("● ESP32 Live")
     else:
         st.sidebar.warning("◎ Simulation")

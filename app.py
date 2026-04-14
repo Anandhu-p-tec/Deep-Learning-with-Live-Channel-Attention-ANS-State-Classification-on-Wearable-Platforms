@@ -226,7 +226,8 @@ def load_model():
 def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
     # Check thread status — thread opens port ONCE, never closes during reruns
     reader = st.session_state.get("serial_reader")
-    if reader and reader.connected:
+    if reader and reader.connected and reader.get_latest() is not None:
+        # Only consider hardware mode if thread is connected AND has received data
         mode = "hardware"
     else:
         mode = "simulation"
@@ -747,8 +748,14 @@ def render_stream_graph() -> None:
         config={"staticPlot": True, "displayModeBar": False},
     )
 
-    if lo_vals and lo_vals[-1] == 1:
-        st.info("Electrodes not connected")
+    # Only show electrode warning if actually on hardware AND leads are off
+    reader = st.session_state.get("serial_reader")
+    is_hw = reader is not None and reader.connected
+    
+    if is_hw and lo_vals and lo_vals[-1] == 1:
+        st.info("⚠️  ECG leads disconnected — reattach electrodes")
+    elif is_hw and (not ecg_vals or all(v == 0 for v in ecg_vals[-5:])):
+        st.info("ECG initializing...")
 
 
 def render_live_sensor_tab() -> None:
@@ -757,6 +764,22 @@ def render_live_sensor_tab() -> None:
     raw = st.session_state.get("last_raw") or {}
     buf = st.session_state.stream_buffer
     hist = st.session_state.sensor_history
+    
+    # Seed buffer with initial simulated data if empty to prevent "Connecting..." message
+    if len(buf.get("gsr", [])) == 0:
+        for _ in range(20):
+            seed_raw = get_latest_raw_sample(st.session_state.get("mode", "simulation"), st.session_state.get("sim_state"))
+            if seed_raw:
+                append_stream_buffer(seed_raw, seed_raw.get("STATE", "NORMAL"))
+    
+    # Show connection status
+    reader = st.session_state.get("serial_reader")
+    is_live = reader is not None and reader.connected
+    if is_live:
+        st.success("● ESP32 Live — Reading from hardware sensors")
+    else:
+        sim_state = st.session_state.get("sim_state", "Normal Baseline")
+        st.info(f"◎ Simulation Mode — Simulating: {sim_state.replace('_', ' ').title()}")
 
     gsr_now = float(raw.get("GSR", _median_recent(buf.get("gsr", []), k=5, default=0.0)))
     spo2_now = float(raw.get("SPO2", _median_recent(buf.get("spo2", []), k=5, default=0.0)))
@@ -801,8 +824,12 @@ def render_live_sensor_tab() -> None:
 
 
 def render_header(mode: str):
-    badge_text = "● ESP32 Live" if mode == "hardware" else "◎ Simulation Mode"
-    badge_color = "#1D9E75" if mode == "hardware" else "#E0A800"
+    # Dynamically check if hardware is actually connected (not just mode-based)
+    reader = st.session_state.get("serial_reader")
+    is_live = reader is not None and reader.connected
+    
+    badge_text = "● ESP32 Live" if is_live else "◎ Simulation Mode"
+    badge_color = "#1D9E75" if is_live else "#E0A800"
 
     left, right = st.columns([4, 1])
     with left:
@@ -1626,7 +1653,13 @@ def render_sidebar_live_values() -> None:
                 st.caption(f"Last line from device: {io.get('last_line')}")
             st.caption("Flash the sensor-stream firmware (GSR,SPO2,TEMP,AX,AY,AZ,BPM) and restart.")
         else:
-            st.info("Connecting to sensor stream...")
+            # Show status instead of generic connecting message
+            reader = st.session_state.get("serial_reader")
+            is_live = reader is not None and reader.connected
+            if is_live:
+                st.info("● ESP32 connected but waiting for first data...")
+            else:
+                st.info("◎ Running in simulation mode — pre-populating buffer...")
 
 
 def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
@@ -1716,6 +1749,15 @@ def main():
             reader = get_serial_reader(ESP32_PORT_ENV)
             st.session_state.serial_reader = reader
             logger.info("[INIT] Background serial thread initialized")
+            # Give thread 1 second to open port and stabilize connection status
+            time.sleep(1.0)
+            logger.info(
+                f"[APP] Serial thread status: connected={reader.connected} port={reader.port}"
+            )
+            if reader.connected:
+                logger.info("✅ ESP32 CONNECTED — Live mode active")
+            else:
+                logger.info("⚠️  No hardware — Simulation mode active")
         except Exception as e:
             st.session_state.serial_reader = None
             logger.warning(f"[INIT] Failed to initialize serial thread: {e}")
@@ -1767,6 +1809,18 @@ def main():
                 st.session_state.history.append(snapshot)
                 if len(st.session_state.history) > 20:
                     st.session_state.history = st.session_state.history[-20:]
+                
+                # Log model inference result
+                reader = st.session_state.get("serial_reader")
+                is_live = reader is not None and reader.connected
+                logger.info(
+                    f"📊 Reading #{st.session_state.reading_count} | "
+                    f"State: {display_state} | "
+                    f"Confidence: {prediction.get('confidence', 0.0):.1f}% | "
+                    f"Dominant: {prediction.get('dominant_sensor', 'N/A')} | "
+                    f"PCS: {pcs:.2f} | "
+                    f"Mode: {'HW' if is_live else 'SIM'}"
+                )
 
                 st.session_state.clinical_context = {
                     "predicted_class": display_state,

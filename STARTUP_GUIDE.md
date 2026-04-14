@@ -16,10 +16,14 @@ Use the demo launcher:
 .\run_demo.ps1
 ```
 
+**⏱️ First startup may take 45+ seconds** as the app waits for hardware detection. This gives the ESP32 time to be recognized on the USB port.
+
 Expected output includes:
 
 - `Starting ANS dashboard in demo-safe mode...`
 - `Local URL: http://localhost:8511`
+- `[INIT] Background serial thread initialized`
+- Within 45 seconds: **✅ ESP32 CONNECTED** (if hardware present) OR **⚠️ No hardware** (if not connected)
 
 Open:
 
@@ -44,15 +48,36 @@ if ($conn) { $conn | Select-Object -ExpandProperty OwningProcess -Unique | ForEa
 
 ## 5) ESP32 check
 
-When connected and streaming, terminal should show logs like:
+**When connected and streaming:**
 
-- `ESP32 CONNECTED on COM3`
-- `[SERIAL] GSR=..., SPO2=..., TEMP=..., BPM=..., STATE=...`
+Terminal should show:
 
-If not streaming, check:
+```
+✅ ESP32 CONNECTED on COM3 — Live mode active
+[INIT] Background serial thread initialized
+```
 
-- USB cable and COM port
-- firmware serial format includes keys: `GSR,SPO2,TEMP,AX,AY,AZ,BPM,RISK,STATE,ECG,ECG_HR,LO`
+Dashboard shows: **● ESP32 Live**
+
+**If NOT streaming:**
+
+Terminal shows:
+
+```
+⚠️  No hardware — Simulation mode active
+[SERIAL THREAD] Port error: FileNotFoundError ('COM3')
+[SERIAL THREAD] Port error... (retrying every 2 seconds)
+```
+
+Dashboard shows: **◎ Simulation Mode** (automatically generates test data)
+
+**To fix:**
+
+- Check USB cable connection to ESP32
+- Verify COM port: `Get-PnpDevice -Class Ports` (PowerShell)
+- If different port, update in `.env`: `ESP32_PORT=COM5` (or your port)
+- Restart app: `Ctrl+C`, then `.\ run_demo.ps1`
+- Verify firmware includes: `GSR,SPO2,TEMP,AX,AY,AZ,BPM,RISK,STATE,ECG,ECG_HR,LO`
 
 ## 6) Stop the app
 
@@ -64,17 +89,17 @@ In the terminal where Streamlit is running:
 
 ## Optional: Manual start (without demo script)
 
-Use venv directly:
+Use venv_short directly:
 
 ```powershell
-& .\.venv\Scripts\Activate.ps1
+& .\.venv_short\Scripts\Activate.ps1
 python -m streamlit run app.py --server.port 8511
 ```
 
 If missing packages:
 
 ```powershell
-python -m pip install streamlit pyserial
+.\venv_short\Scripts\python.exe -m pip install streamlit pyserial
 ```
 
 ## Daily quick flow

@@ -19,4 +19,4 @@ $env:PYTHONUTF8 = '1'
 Write-Host 'Starting ANS dashboard in demo-safe mode...' -ForegroundColor Cyan
 Write-Host 'Use Ctrl+C to stop the app.' -ForegroundColor Cyan
 
-& $venvPython -m streamlit run app.py --server.headless true --server.port 8511
+& $venvPython -m streamlit run app.py --server.port 8511 --logger.level=info 2>&1

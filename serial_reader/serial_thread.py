@@ -33,6 +33,7 @@ class SerialReaderThread:
         self._thread = None
         self._connected = False
         self._last_raw = None
+        self._parse_count = 0
 
     def start(self):
         """Start the background read thread if not already running."""
@@ -75,12 +76,26 @@ class SerialReaderThread:
             items = list(self._buffer)
         return items[-n:] if len(items) >= n else items
 
+    def wait_for_connection(self, timeout: float = 5.0) -> bool:
+        """
+        Block until port is connected or timeout expires.
+        Returns True if connected, False if timeout.
+        Useful for initialization to ensure hardware is ready before app checks.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            if self._connected:
+                return True
+            time.sleep(0.1)
+        return False
+
     def _read_loop(self):
         """
         Main loop: open port, continuously read lines, parse, store in buffer.
         Handles reconnection on port errors.
         """
         ser = None
+        retry_count = 0
         while self._running:
             try:
                 # Open or reconnect to port if needed
@@ -91,12 +106,25 @@ class SerialReaderThread:
                         timeout=2,
                     )
                     self._connected = True
+                    retry_count = 0  # Reset retry counter on successful connection
                     logger.info(
                         f"[SERIAL THREAD] Port {self.port} opened successfully"
                     )
 
-                # Read one line from serial
-                line = ser.readline().decode("utf-8", errors="ignore").strip()
+                # Read one line from serial (non-blocking)
+                try:
+                    line = ser.readline().decode("utf-8", errors="ignore").strip()
+                except Exception as read_err:
+                    logger.debug(f"[SERIAL THREAD] Read error: {read_err}")
+                    self._connected = False
+                    if ser:
+                        try:
+                            ser.close()
+                        except:
+                            pass
+                    ser = None
+                    time.sleep(1)
+                    continue
 
                 if not line or ":" not in line:
                     continue
@@ -124,17 +152,30 @@ class SerialReaderThread:
                     with self._lock:
                         self._buffer.append(parsed)
                         self._last_raw = parsed
+                    # Log every 10 successful parses
+                    self._parse_count += 1
+                    if self._parse_count % 10 == 0:
+                        logger.info(
+                            f"[SERIAL] GSR={parsed.get('GSR', 0):.0f} | "
+                            f"SPO2={parsed.get('SPO2', 0):.1f} | "
+                            f"TEMP={parsed.get('TEMP', 0):.1f}°C | "
+                            f"ECG={parsed.get('ECG', 0):.0f} | "
+                            f"STATE={parsed.get('STATE', '?')}"
+                        )
 
             except serial.SerialException as e:
                 self._connected = False
-                logger.warning(f"[SERIAL THREAD] Port error: {e}")
+                retry_count += 1
+                # Log port errors only once every 3 retries to avoid spam
+                if retry_count % 3 == 1:
+                    logger.warning(f"[SERIAL THREAD] Port error (retrying): {e}")
                 if ser:
                     try:
                         ser.close()
                     except:
                         pass
                     ser = None
-                time.sleep(2)
+                time.sleep(1)  # Faster retry (1s instead of 2s)
 
             except Exception as e:
                 logger.warning(f"[SERIAL THREAD] Unexpected error: {e}")

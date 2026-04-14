@@ -761,7 +761,6 @@ def render_stream_graph() -> None:
 def render_live_sensor_tab() -> None:
     st.subheader("📈 Live Sensor Monitor")
 
-    raw = st.session_state.get("last_raw") or {}
     buf = st.session_state.stream_buffer
     hist = st.session_state.sensor_history
     
@@ -780,6 +779,30 @@ def render_live_sensor_tab() -> None:
     else:
         sim_state = st.session_state.get("sim_state", "Normal Baseline")
         st.info(f"◎ Simulation Mode — Simulating: {sim_state.replace('_', ' ').title()}")
+    
+    # CRITICALLY: Fetch fresh data from reader buffer directly on every render, 
+    # not stale session state. This ensures UI shows live data immediately.
+    if is_live and reader:
+        # Pull latest 30 samples from reader's thread-safe buffer
+        thread_buffer = reader.get_buffer_snapshot(n=30)
+        if thread_buffer:
+            # Update session stream_buffer with fresh thread data
+            for sample in thread_buffer:
+                append_stream_buffer(sample, sample.get("STATE", "NORMAL"))
+    
+    # Use the latest value from the buffer, not stale session state
+    raw = {}
+    if buf.get("gsr"):
+        raw = {
+            "GSR": buf["gsr"][-1] if buf["gsr"] else 0.0,
+            "SPO2": buf["spo2"][-1] if buf["spo2"] else 0.0,
+            "TEMP": buf["temp"][-1] if buf["temp"] else 0.0,
+            "BPM": buf["bpm"][-1] if buf["bpm"] else 0.0,
+            "ECG": buf["ecg"][-1] if buf["ecg"] else 0.0,
+            "STATE": buf["state"][-1] if buf["state"] else "NORMAL",
+            "LO": buf["lo"][-1] if buf["lo"] else 1.0,
+            "RISK": buf["risk"][-1] if buf["risk"] else 0,
+        }
 
     gsr_now = float(raw.get("GSR", _median_recent(buf.get("gsr", []), k=5, default=0.0)))
     spo2_now = float(raw.get("SPO2", _median_recent(buf.get("spo2", []), k=5, default=0.0)))

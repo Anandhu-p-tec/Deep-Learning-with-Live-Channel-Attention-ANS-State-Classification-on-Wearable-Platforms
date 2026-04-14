@@ -1825,13 +1825,17 @@ def main():
     render_header(mode)
 
     # One raw sample per cycle, shared by both tabs.
+    logger.info(f"[MAIN] Starting cycle - fetching latest raw sample")
     raw = get_latest_raw_sample(mode, sim_state)
+    logger.info(f"[MAIN] Got raw sample: {raw is not None}")
     if raw:
         st.session_state.last_raw = raw  # Store for render_live_sensor_tab
         state_name = str(raw.get("STATE", "NORMAL"))
+        logger.info(f"[MAIN] Appending to stream buffer: GSR={raw['GSR']:.0f}, SPO2={raw['SPO2']:.1f}, TEMP={raw['TEMP']:.1f}, STATE={state_name}")
         update_sensor_history(raw, state_name)
         append_stream_buffer(raw, state_name)
         append_normalized_sample(raw)
+        logger.info(f"[MAIN] Buffer now has {len(st.session_state.stream_buffer['gsr'])} samples")
 
     # Single-cycle counter drives model and Groq cadence.
     st.session_state.cycle_count = int(st.session_state.get("cycle_count", 0)) + 1
@@ -1944,16 +1948,21 @@ def main():
                 )
                 logger.info(f"[MAIN] AI tab rendered successfully")
 
-    # AUTO-REFRESH: Use session state counter to trigger reruns
+    # AUTO-REFRESH: Use session state counter and timer to force continuous reruns
+    if "rerun_counter" not in st.session_state:
+        st.session_state.rerun_counter = 0
     if "last_rerun_time" not in st.session_state:
         st.session_state.last_rerun_time = time.time()
     
     # Trigger rerun every interval seconds by checking elapsed time
     elapsed = time.time() - st.session_state.last_rerun_time
-    logger.info(f"[MAIN] Rerun check: interval={interval}s, elapsed={elapsed:.2f}s, will_rerun={elapsed >= interval}")
+    logger.info(f"[MAIN] Rerun check: interval={interval}s, elapsed={elapsed:.2f}s, counter={st.session_state.rerun_counter}, will_rerun={elapsed >= interval}")
+    
+    # FORCE RERUN using a placeholder with a key that increments
     if elapsed >= interval:
+        st.session_state.rerun_counter += 1
         st.session_state.last_rerun_time = time.time()
-        logger.info(f"[MAIN] Triggering rerun")
+        logger.info(f"[MAIN] Triggering aggressive rerun #{st.session_state.rerun_counter}")
         st.rerun()
 
 

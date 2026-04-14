@@ -687,8 +687,12 @@ def render_live_sensor_activity() -> None:
 
 
 def render_stream_graph() -> None:
+    logger.info(f"[GRAPH] Rendering stream graph")
     buf = st.session_state.stream_buffer
+    logger.info(f"[GRAPH] Buffer data: readings={len(buf['readings'])}, gsr={len(buf['gsr'])}, spo2={len(buf['spo2'])}, temp={len(buf['temp'])}, ecg={len(buf['ecg'])}")
+    
     if not buf["readings"]:
+        logger.info(f"[GRAPH] Buffer empty, showing wait message")
         st.info("Waiting for stream buffer...")
         return
 
@@ -696,6 +700,7 @@ def render_stream_graph() -> None:
     lo_vals = buf.get("lo", [])
     ecg_vals = buf.get("ecg", [])
     ecg_plot = [0.0 if ((lo_vals[i] if i < len(lo_vals) else 1) == 1) else float(v) for i, v in enumerate(ecg_vals)]
+    logger.info(f"[GRAPH] Prepared plot data: x_vals={len(x_vals)}, ecg_plot={len(ecg_plot)}")
 
     fig = make_subplots(
         rows=3,
@@ -740,12 +745,14 @@ def render_stream_graph() -> None:
     fig.update_yaxes(range=[0, 180], row=2, col=2)
     fig.update_yaxes(range=[0, 4095], row=3, col=1)
 
+    logger.info(f"[GRAPH] Figure created, rendering to UI")
     st.plotly_chart(
         fig,
         width="stretch",
         key="live_stream_graph",
         config={"staticPlot": True, "displayModeBar": False},
     )
+    logger.info(f"[GRAPH] Graph rendered successfully")
 
     # Only show electrode warning if actually on hardware AND leads are off
     reader = st.session_state.get("serial_reader")
@@ -759,20 +766,25 @@ def render_stream_graph() -> None:
 
 def render_live_sensor_tab() -> None:
     st.subheader("📈 Live Sensor Monitor")
+    logger.info(f"[RENDER TAB] Live Sensor tab starting")
 
     buf = st.session_state.stream_buffer
     hist = st.session_state.sensor_history
+    logger.info(f"[RENDER TAB] Buffer state: gsr={len(buf.get('gsr', []))} samples, readings={len(buf.get('readings', []))} readings")
     
     # Seed buffer with initial simulated data if empty to prevent "Connecting..." message
     if len(buf.get("gsr", [])) == 0:
+        logger.info(f"[RENDER TAB] Seeding buffer with 20 samples")
         for _ in range(20):
             seed_raw = get_latest_raw_sample(st.session_state.get("mode", "simulation"), st.session_state.get("sim_state"))
             if seed_raw:
                 append_stream_buffer(seed_raw, seed_raw.get("STATE", "NORMAL"))
+        logger.info(f"[RENDER TAB] Seeding complete: buffer now has {len(buf.get('gsr', []))} samples")
     
     # Show connection status
     reader = st.session_state.get("serial_reader")
     is_live = reader is not None and reader.connected
+    logger.info(f"[RENDER TAB] Connection status: is_live={is_live}")
     if is_live:
         st.success("● ESP32 Live — Reading from hardware sensors")
     else:
@@ -791,11 +803,13 @@ def render_live_sensor_tab() -> None:
         
         # Only process NEW samples since last sync
         new_samples_count = max(0, current_count - st.session_state.last_thread_sync)
+        logger.info(f"[RENDER TAB] Thread buffer sync: total={current_count}, last_sync={st.session_state.last_thread_sync}, new={new_samples_count}")
         if new_samples_count > 0:
             # Append only the new samples (last N items)
             new_samples = thread_buffer[-new_samples_count:] if new_samples_count < len(thread_buffer) else thread_buffer
-            for sample in new_samples:
+            for idx, sample in enumerate(new_samples):
                 append_stream_buffer(sample, sample.get("STATE", "NORMAL"))
+            logger.info(f"[RENDER TAB] Appended {len(new_samples)} new samples, buffer now {len(buf.get('gsr', []))} samples")
         
         st.session_state.last_thread_sync = current_count
     
@@ -812,6 +826,7 @@ def render_live_sensor_tab() -> None:
             "LO": buf["lo"][-1] if buf["lo"] else 1.0,
             "RISK": buf["risk"][-1] if buf["risk"] else 0,
         }
+        logger.info(f"[RENDER TAB] Latest raw values: GSR={raw['GSR']:.0f}, SPO2={raw['SPO2']:.1f}, TEMP={raw['TEMP']:.1f}, STATE={raw['STATE']}")
 
     gsr_now = float(raw.get("GSR", _median_recent(buf.get("gsr", []), k=5, default=0.0)))
     spo2_now = float(raw.get("SPO2", _median_recent(buf.get("spo2", []), k=5, default=0.0)))
@@ -1896,20 +1911,30 @@ def main():
         "🧠  AI Analysis",
     ])
 
+    logger.info(f"[MAIN] Tabs created, rendering tab1")
     with tab1:
         render_live_sensor_tab()
-
+    
+    logger.info(f"[MAIN] Tab1 rendered, checking AI tab readiness")
     with tab2:
+        logger.info(f"[MAIN] AI tab starting - checking last_result")
         last = st.session_state.get("last_result")
+        logger.info(f"[MAIN] last_result={last is not None}")
         if last is None:
+            logger.info(f"[MAIN] No predictions yet, showing collect message")
             st.info("Collecting data for first AI inference...")
         else:
+            logger.info(f"[MAIN] Building inference window")
             window = st.session_state.get("last_window")
             if window is None:
+                logger.info(f"[MAIN] No cached window, building from inference")
                 window = build_window_for_inference(mode, sim_state)
+                logger.info(f"[MAIN] Built window: {window.shape if window is not None else None}")
             if window is None:
+                logger.info(f"[MAIN] Window still None after build")
                 st.info("Waiting for sufficient buffered samples...")
             else:
+                logger.info(f"[MAIN] Rendering AI tab with window {window.shape}")
                 render_ai_tab(
                     window,
                     last,
@@ -1917,6 +1942,7 @@ def main():
                     bool(last.get("sensor_conflict", False)),
                     groq_key,
                 )
+                logger.info(f"[MAIN] AI tab rendered successfully")
 
     # AUTO-REFRESH: Use session state counter to trigger reruns
     if "last_rerun_time" not in st.session_state:
@@ -1924,8 +1950,10 @@ def main():
     
     # Trigger rerun every interval seconds by checking elapsed time
     elapsed = time.time() - st.session_state.last_rerun_time
+    logger.info(f"[MAIN] Rerun check: interval={interval}s, elapsed={elapsed:.2f}s, will_rerun={elapsed >= interval}")
     if elapsed >= interval:
         st.session_state.last_rerun_time = time.time()
+        logger.info(f"[MAIN] Triggering rerun")
         st.rerun()
 
 

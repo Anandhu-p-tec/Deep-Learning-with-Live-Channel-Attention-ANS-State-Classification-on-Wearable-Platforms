@@ -55,6 +55,8 @@ defaults = {
     "clinical_payload": None,
     "clinical_context": None,
     "last_clinical_update": "--:--:--",
+    "hardware_lock": False,
+    "last_mode_logged": None,
     "cycle_count": 0,
     "stream_buffer": {
         "readings": [],
@@ -242,15 +244,26 @@ def close_session_reader() -> None:
 
 
 def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
-    # Always prefer live hardware when it is available, so a previous
-    # simulation fallback does not permanently lock the session.
-    st.session_state.mode = "hardware" if has_device(preferred_port=ESP32_PORT_ENV) else "simulation"
-    mode = st.session_state.mode
-    if mode == "hardware":
-        logger.info("✅ ESP32 CONNECTED on COM3 — Live mode active")
+    # Latch hardware mode once detected to avoid COM probe flapping between reruns.
+    detected_now = has_device(preferred_port=ESP32_PORT_ENV)
+    if detected_now:
+        st.session_state.hardware_lock = True
+        mode = "hardware"
+    elif st.session_state.get("hardware_lock", False):
+        mode = "hardware"
     else:
-        close_session_reader()
-        logger.info("⚠️  No hardware — Simulation mode active")
+        mode = "simulation"
+
+    st.session_state.mode = mode
+
+    if st.session_state.get("last_mode_logged") != mode:
+        if mode == "hardware":
+            logger.info("✅ ESP32 CONNECTED on COM3 — Live mode active")
+        else:
+            close_session_reader()
+            logger.info("⚠️  No hardware — Simulation mode active")
+        st.session_state.last_mode_logged = mode
+
     return mode, None
 
 
@@ -305,11 +318,10 @@ def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]
                     }
                     return st.session_state.last_window
 
-                st.session_state.mode = "simulation"
                 st.session_state.io_status = {
                     **stats,
                     "ok": False,
-                    "reason": "fallback_to_simulation",
+                    "reason": "fallback_to_simulated_window",
                 }
                 sim_window = get_simulated_window("normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
                 st.session_state.last_window = sim_window
@@ -1704,7 +1716,8 @@ def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
         st.sidebar.caption("No AI readings yet")
 
     st.sidebar.divider()
-    key_default = st.session_state.get("groq_key", GROQ_API_KEY_ENV or "")
+    session_key = (st.session_state.get("groq_key") or "").strip()
+    key_default = session_key if session_key else (GROQ_API_KEY_ENV or "")
     st.session_state.groq_key = st.sidebar.text_input(
         "Groq API Key",
         value=key_default,

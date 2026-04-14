@@ -727,7 +727,6 @@ def render_stream_graph() -> None:
     fig.update_layout(
         height=500,
         showlegend=False,
-        uirevision="constant",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="white"),
@@ -1919,13 +1918,14 @@ def main():
                     groq_key,
                 )
 
-    # AUTO-REFRESH: Trigger periodic reruns to fetch fresh data from background thread
-    # This ensures UI updates continuously without user interaction
-    with st.empty():
-        placeholder = st.empty()
-        # Use the sidebar interval setting (2-10 seconds) to control refresh rate
-        time.sleep(interval)
-        placeholder.text("")  # Clear placeholder
+    # AUTO-REFRESH: Use session state counter to trigger reruns
+    if "last_rerun_time" not in st.session_state:
+        st.session_state.last_rerun_time = time.time()
+    
+    # Trigger rerun every interval seconds by checking elapsed time
+    elapsed = time.time() - st.session_state.last_rerun_time
+    if elapsed >= interval:
+        st.session_state.last_rerun_time = time.time()
         st.rerun()
 
 

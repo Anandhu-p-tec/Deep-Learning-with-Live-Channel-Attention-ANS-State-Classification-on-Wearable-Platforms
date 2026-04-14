@@ -780,18 +780,28 @@ def render_live_sensor_tab() -> None:
         sim_state = st.session_state.get("sim_state", "Normal Baseline")
         st.info(f"◎ Simulation Mode — Simulating: {sim_state.replace('_', ' ').title()}")
     
-    # CRITICALLY: Fetch fresh data from reader buffer directly on every render, 
-    # not stale session state. This ensures UI shows live data immediately.
-    if is_live and reader:
-        # Pull latest 30 samples from reader's thread-safe buffer
-        thread_buffer = reader.get_buffer_snapshot(n=30)
-        if thread_buffer:
-            # Update session stream_buffer with fresh thread data
-            for sample in thread_buffer:
-                append_stream_buffer(sample, sample.get("STATE", "NORMAL"))
+    # SYNC: Append only NEW samples from thread buffer (since last sync)
+    # Track last sync count to avoid re-adding the same samples on every rerun
+    if "last_thread_sync" not in st.session_state:
+        st.session_state.last_thread_sync = 0
     
-    # Use the latest value from the buffer, not stale session state
-    raw = {}
+    if is_live and reader:
+        # Get all samples from thread buffer
+        thread_buffer = reader.get_buffer_snapshot(n=500)  # Get all available
+        current_count = len(thread_buffer)
+        
+        # Only process NEW samples since last sync
+        new_samples_count = max(0, current_count - st.session_state.last_thread_sync)
+        if new_samples_count > 0:
+            # Append only the new samples (last N items)
+            new_samples = thread_buffer[-new_samples_count:] if new_samples_count < len(thread_buffer) else thread_buffer
+            for sample in new_samples:
+                append_stream_buffer(sample, sample.get("STATE", "NORMAL"))
+        
+        st.session_state.last_thread_sync = current_count
+    
+    # Get latest values from buffer for display
+    raw = st.session_state.get("last_raw") or {}
     if buf.get("gsr"):
         raw = {
             "GSR": buf["gsr"][-1] if buf["gsr"] else 0.0,
@@ -1803,6 +1813,7 @@ def main():
     # One raw sample per cycle, shared by both tabs.
     raw = get_latest_raw_sample(mode, sim_state)
     if raw:
+        st.session_state.last_raw = raw  # Store for render_live_sensor_tab
         state_name = str(raw.get("STATE", "NORMAL"))
         update_sensor_history(raw, state_name)
         append_stream_buffer(raw, state_name)

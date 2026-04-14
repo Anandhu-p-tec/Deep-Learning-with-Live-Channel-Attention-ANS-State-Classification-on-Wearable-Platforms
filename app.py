@@ -95,8 +95,9 @@ from model.model_utils import (
     mc_dropout_predict,
     compute_pcs,
 )
-from serial_reader.esp32_reader import ESP32Reader, has_device, normalize_reading
+from serial_reader.esp32_reader import normalize_reading
 from serial_reader.simulator import get_simulated_window
+from serial_reader.serial_thread import get_serial_reader
 from groq_interpreter import get_clinical_interpretation
 
 load_dotenv()
@@ -219,48 +220,24 @@ def load_model():
         return load_or_create_model()
 
 
-def get_session_reader() -> ESP32Reader:
-    reader = st.session_state.get("esp32_reader")
-    if isinstance(reader, ESP32Reader):
-        return reader
 
-    reader = ESP32Reader(
-        read_timeout=0.15,
-        scan_timeout=0.8,
-        preferred_port=ESP32_PORT_ENV,
-    )
-    st.session_state.esp32_reader = reader
-    return reader
-
-
-def close_session_reader() -> None:
-    reader = st.session_state.get("esp32_reader")
-    if isinstance(reader, ESP32Reader):
-        try:
-            reader.close()
-        except Exception:
-            logger.exception("[HW] failed to close session reader")
-    st.session_state.esp32_reader = None
 
 
 def get_mode_and_sim_state() -> Tuple[str, Optional[str]]:
-    # Latch hardware mode once detected to avoid COM probe flapping between reruns.
-    detected_now = has_device(preferred_port=ESP32_PORT_ENV)
-    if detected_now:
-        st.session_state.hardware_lock = True
-        mode = "hardware"
-    elif st.session_state.get("hardware_lock", False):
+    # Check thread status — thread opens port ONCE, never closes during reruns
+    reader = st.session_state.get("serial_reader")
+    if reader and reader.connected:
         mode = "hardware"
     else:
         mode = "simulation"
 
     st.session_state.mode = mode
 
+    # Log mode once per change
     if st.session_state.get("last_mode_logged") != mode:
         if mode == "hardware":
             logger.info("✅ ESP32 CONNECTED on COM3 — Live mode active")
         else:
-            close_session_reader()
             logger.info("⚠️  No hardware — Simulation mode active")
         st.session_state.last_mode_logged = mode
 
@@ -282,89 +259,65 @@ def _resample_window(window: np.ndarray, target_samples: int = MODEL_WINDOW_SAMP
 
 
 def get_next_window(mode: str, sim_state: Optional[str]) -> Optional[np.ndarray]:
+    """
+    Get the next model window (30 samples, 4 channels).
+    In hardware mode: reads from background thread buffer (no port open/close).
+    In simulation mode: generates synthetic window.
+    """
     try:
         if mode == "hardware":
-            # Read a shorter live window for faster startup, then resample.
-            reader = ESP32Reader(
-                read_timeout=0.15,
-                scan_timeout=0.8,
-                preferred_port=ESP32_PORT_ENV,
-            )
-            window = reader.read_window(n_samples=MODEL_WINDOW_SAMPLES, max_window_seconds=2.5)
-            stats = dict(reader.last_stats)
-            last_raw = dict(reader.last_raw) if reader.last_raw else None
-            reader.close()
-            st.session_state.io_status = stats
-            st.session_state.last_raw = last_raw
-            logger.info(
-                "[HW] port=%s ok=%s samples=%s/%s valid=%s invalid=%s elapsed=%.3fs reason=%s",
-                stats.get("port"),
-                stats.get("ok"),
-                stats.get("collected_samples"),
-                stats.get("requested_samples"),
-                stats.get("valid_lines"),
-                stats.get("invalid_lines"),
-                float(stats.get("elapsed_seconds", 0.0)),
-                stats.get("reason"),
-            )
-            if stats.get("last_valid_line"):
-                logger.info("[HW] last_valid_line=%s", stats.get("last_valid_line"))
-            if window is None or window.shape[0] < 1:
-                if st.session_state.get("last_window") is not None:
-                    st.session_state.io_status = {
-                        **stats,
-                        "ok": False,
-                        "reason": "reused_last_window",
-                    }
-                    return st.session_state.last_window
+            reader = st.session_state.get("serial_reader")
+            if reader and reader.connected:
+                samples = reader.get_buffer_snapshot(MODEL_WINDOW_SAMPLES)
+                if len(samples) >= 5:
+                    # Normalize each sample
+                    normalized = []
+                    for s in samples:
+                        try:
+                            norm = normalize_reading(s)
+                            normalized.append(norm)
+                        except Exception:
+                            logger.exception("[HW] failed to normalize sample")
+                            continue
 
-                st.session_state.io_status = {
-                    **stats,
-                    "ok": False,
-                    "reason": "fallback_to_simulated_window",
-                }
-                sim_window = get_simulated_window("normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
-                st.session_state.last_window = sim_window
-                return sim_window
+                    if len(normalized) > 0:
+                        import numpy as np
+                        arr = np.array(normalized, dtype=np.float32)
+                        # Pad or trim to exactly MODEL_WINDOW_SAMPLES
+                        if len(arr) < MODEL_WINDOW_SAMPLES:
+                            pad = np.tile(
+                                arr[-1],
+                                (MODEL_WINDOW_SAMPLES - len(arr), 1),
+                            )
+                            arr = np.vstack([arr, pad])
+                        st.session_state.last_window = arr[:MODEL_WINDOW_SAMPLES]
+                        return arr[:MODEL_WINDOW_SAMPLES]
 
-            resampled = _resample_window(window, target_samples=MODEL_WINDOW_SAMPLES)
-            st.session_state.last_window = resampled
-            return resampled
-        st.session_state.io_status = {}
-        st.session_state.last_raw = None
-        sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
+            # Fallback to simulation if thread not available
+            sim_window = get_simulated_window(
+                sim_state or "normal_baseline",
+                n_samples=MODEL_WINDOW_SAMPLES,
+            )
+            st.session_state.last_window = sim_window
+            return sim_window
+
+        # Pure simulation mode
+        sim_window = get_simulated_window(
+            sim_state or "normal_baseline",
+            n_samples=MODEL_WINDOW_SAMPLES,
+        )
         st.session_state.last_window = sim_window
         return sim_window
+
     except Exception:
+        logger.exception("[HW] read failure")
         if st.session_state.get("last_window") is not None:
-            logger.exception("[HW] read failure, reusing last valid window")
-            st.session_state.io_status = {
-                "port": ESP32_PORT_ENV,
-                "ok": False,
-                "reason": "exception_reused_last_window",
-                "collected_samples": 0,
-                "requested_samples": MODEL_WINDOW_SAMPLES,
-                "valid_lines": 0,
-                "invalid_lines": 0,
-                "elapsed_seconds": 0.0,
-                "last_valid_line": "",
-            }
             return st.session_state.last_window
 
-        st.session_state.mode = "simulation"
-        logger.exception("[HW] read failure, switching to simulation")
-        st.session_state.io_status = {
-            "port": ESP32_PORT_ENV,
-            "ok": False,
-            "reason": "exception_fallback",
-            "collected_samples": 0,
-            "requested_samples": MODEL_WINDOW_SAMPLES,
-            "valid_lines": 0,
-            "invalid_lines": 0,
-            "elapsed_seconds": 0.0,
-            "last_valid_line": "",
-        }
-        sim_window = get_simulated_window("normal_baseline", n_samples=MODEL_WINDOW_SAMPLES)
+        sim_window = get_simulated_window(
+            "normal_baseline",
+            n_samples=MODEL_WINDOW_SAMPLES,
+        )
         st.session_state.last_window = sim_window
         return sim_window
 
@@ -1552,16 +1505,14 @@ def get_latest_raw_sample(mode: str, sim_state: Optional[str]) -> Optional[Dict[
     """Fetch one fresh raw sample for fast UI updates without model inference."""
     try:
         if mode == "hardware":
-            reader = get_session_reader()
-            # A short burst greatly improves chances of receiving at least one valid line.
-            _ = reader.read_window(n_samples=5, max_window_seconds=1.2)
-            st.session_state.io_status = dict(reader.last_stats)
-            raw = dict(reader.last_raw) if reader.last_raw else None
-            if raw:
-                st.session_state.last_raw = raw
-            return raw
+            reader = st.session_state.get("serial_reader")
+            if reader and reader.connected:
+                raw = reader.get_latest()
+                if raw:
+                    st.session_state.last_raw = raw
+                    return raw
 
-        close_session_reader()
+        # Fallback to simulator
         sim_window = get_simulated_window(sim_state or "normal_baseline", n_samples=1)
         gsr = float(np.clip(sim_window[0, 0], 0.0, 1.0)) * 4095.0
         spo2 = 90.0 + float(np.clip(sim_window[0, 1], 0.0, 1.0)) * 10.0
@@ -1759,6 +1710,16 @@ def render_ai_tab(window: np.ndarray, prediction: dict, pcs: float, sensor_confl
 
 
 def main():
+    # Initialize background serial reader ONCE per session
+    if "serial_reader" not in st.session_state:
+        try:
+            reader = get_serial_reader(ESP32_PORT_ENV)
+            st.session_state.serial_reader = reader
+            logger.info("[INIT] Background serial thread initialized")
+        except Exception as e:
+            st.session_state.serial_reader = None
+            logger.warning(f"[INIT] Failed to initialize serial thread: {e}")
+
     mode, _ = get_mode_and_sim_state()
     sim_state, interval, groq_key = render_sidebar_panel(mode)
 
@@ -1859,9 +1820,6 @@ def main():
                     bool(last.get("sensor_conflict", False)),
                     groq_key,
                 )
-
-    time.sleep(max(int(interval), 1))
-    st.rerun()
 
 
 if __name__ == "__main__":

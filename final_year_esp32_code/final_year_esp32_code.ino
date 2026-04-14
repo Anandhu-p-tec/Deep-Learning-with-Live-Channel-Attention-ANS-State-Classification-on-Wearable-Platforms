@@ -12,7 +12,7 @@
 #define DHT_PIN      4   // DHT11
 #define DHT_TYPE    DHT11
 #define ECG_PIN     33   // AD8232 OUTPUT
-#define LO_PLUS_PIN 32   // AD8232 LO+
+#define LO_PLUS     32   // AD8232 LO+
 // AD8232 LO-  → GND
 // AD8232 VCC  → 3.3V
 // AD8232 GND  → GND
@@ -39,8 +39,6 @@ long  redValue         = 0;
 bool  fingerOn         = false;
 float spo2             = 0;
 float bpm              = 0;
-
-const int ECG_PEAK_THRESHOLD = 2500;
 
 // ═══════════════════════════════════════════════
 //  AD8232 ECG — Smart filtered
@@ -88,7 +86,7 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
-  pinMode(LO_PLUS_PIN, INPUT);
+  pinMode(LO_PLUS, INPUT);
 
   Wire.begin(21, 22);
   Wire.setClock(400000);
@@ -116,7 +114,7 @@ void setup() {
   // DHT11
   dht.begin();
   Serial.println("DHT11 OK");
-  Serial.println("AD8232 ECG ready");
+  Serial.println("AD8232 OK");
   Serial.println("BOOT_OK");
 }
 
@@ -126,9 +124,9 @@ void setup() {
 float estimateSpO2(long ir, long red) {
   if (ir < 100000) return 0;
   float r   = (float)red / (float)ir;
-  float est = 110.0 - 25.0 * r;
+  float est = 104.0 - 17.0 * r;
   if (est > 100) est = 100;
-  if (est < 85)  est = 85;
+  if (est < 90)  est = 90;
   return est;
 }
 
@@ -171,13 +169,20 @@ void updateDynamicThreshold(int val) {
 //  ECG — SMART BEAT DETECTION
 // ═══════════════════════════════════════════════
 int detectECGHeartRate(int smoothed) {
-  if (smoothed > ECG_PEAK_THRESHOLD && !abovePeak) {
+  updateDynamicThreshold(smoothed);
+
+  int range     = dynamicPeak - dynamicMin;
+  int threshold = dynamicMin + (int)(range * 0.7);
+
+  if (range < 50) return ecgHR;
+
+  if (smoothed > threshold && !abovePeak) {
     abovePeak     = true;
     long now      = millis();
     long interval = now - lastPeakTime;
     lastPeakTime  = now;
 
-    if (interval > 300 && interval < 2000) {
+    if (interval > 300 && interval < 1500) {
       int newHR = (int)(60000.0 / interval);
       hrECGBuffer[hrECGIndex] = newHR;
       hrECGIndex = (hrECGIndex + 1) % 5;
@@ -190,7 +195,7 @@ int detectECGHeartRate(int smoothed) {
       }
       if (count > 0) ecgHR = sum / count;
     }
-  } else if (smoothed < ECG_PEAK_THRESHOLD) {
+  } else if (smoothed <= threshold) {
     abovePeak = false;
   }
   return ecgHR;
@@ -204,7 +209,7 @@ int computeRisk() {
   // Use MAX30105 BPM if finger on, else ECG HR
   float activeHR = (bpm > 0) ? bpm : (float)ecgHR;
 
-  if (spo2 > 0 && spo2 < 94)                            score++;
+  if (spo2 > 0 && spo2 < 90)                            score++;
   if (activeHR > 110 || (activeHR > 0 && activeHR < 50)) score++;
   if (temp > 37.5)                                       score++;
   if (gsr > 2000)                                        score++;
@@ -317,6 +322,6 @@ void loop() {
     Serial.print(",STATE:");  Serial.print(state);
     Serial.print(",ECG:");    Serial.print(ecgSmoothed);
     Serial.print(",ECG_HR:"); Serial.print(ecgHR);
-    Serial.print(",LO:");     Serial.println(digitalRead(LO_PLUS_PIN));
+    Serial.print(",LO:");     Serial.println(digitalRead(LO_PLUS));
   }
 }

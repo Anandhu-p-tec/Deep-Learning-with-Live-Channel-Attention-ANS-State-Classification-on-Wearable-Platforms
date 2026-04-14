@@ -222,6 +222,36 @@ class ESP32Reader:
 			gsr_norm, spo2_norm, temp_norm, accel_norm
 		], dtype=np.float32)
 
+	@staticmethod
+	def normalize_reading_static(data, last_gsr: float = 1000.0):
+		"""
+		Static method to normalize a raw reading dict.
+		Does not require an ESP32Reader instance.
+		"""
+		gsr_raw = float(data.get("GSR", 0.0))
+		if gsr_raw < 50.0:
+			gsr_raw = last_gsr
+		gsr_norm = min(gsr_raw / 4095.0, 1.0)
+
+		spo2_raw = float(data.get("SPO2", 0.0))
+		if spo2_raw < 1.0:
+			spo2_norm = 0.75
+		else:
+			spo2_norm = max(0.0, min((spo2_raw - 85.0) / 15.0, 1.0))
+
+		temp_raw = float(data.get("TEMP", 35.0))
+		temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))
+
+		ax = float(data.get("AX", 0.0))
+		ay = float(data.get("AY", 0.0))
+		az = float(data.get("AZ", 0.0))
+		accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
+		accel_norm = min(accel_mag / 2.0, 1.0)
+
+		return np.array([
+			gsr_norm, spo2_norm, temp_norm, accel_norm
+		], dtype=np.float32)
+
 	def read_window(self, n_samples: int = 30, max_window_seconds: float = 2.5) -> Optional[np.ndarray]:
 		"""Read serial stream and return normalized shape (n_samples, 4)."""
 		try:

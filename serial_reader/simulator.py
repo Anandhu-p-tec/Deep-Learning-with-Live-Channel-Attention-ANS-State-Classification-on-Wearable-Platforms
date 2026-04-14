@@ -126,3 +126,64 @@ def get_simulated_window(mode: str, n_samples: int = 500) -> np.ndarray:
 		window[i, 3] = _normalize(accel_mag, ACCEL_MAG_MIN, ACCEL_MAG_MAX)
 
 	return window
+
+
+def get_simulated_window_as_raw(mode: str) -> Dict[str, float]:
+	"""
+	Return one simulated raw sensor reading as a dict (not normalized).
+	Format matches ESP32 output: GSR, SPO2, TEMP, AX, AY, AZ, BPM, ECG, etc.
+	"""
+	_validate_mode(mode)
+	base = MODE_CONFIG[mode]
+
+	gsr = _clip(
+		np.random.normal(base["gsr"], GSR_NOISE_SIGMA),
+		GSR_MIN,
+		GSR_MAX,
+	) * 4095.0 / GSR_MAX  # Scale to 12-bit ADC range
+
+	spo2 = _clip(
+		np.random.normal(base["spo2"], SPO2_NOISE_SIGMA),
+		SPO2_MIN,
+		SPO2_MAX,
+	)
+
+	temp = _clip(
+		np.random.normal(base["temp"], TEMP_NOISE_SIGMA),
+		TEMP_MIN,
+		TEMP_MAX,
+	)
+
+	ax = _clip(
+		np.random.normal(base["ax"], ACCEL_AXIS_NOISE_SIGMA),
+		ACCEL_AXIS_MIN,
+		ACCEL_AXIS_MAX,
+	)
+	ay = _clip(
+		np.random.normal(base["ay"], ACCEL_AXIS_NOISE_SIGMA),
+		ACCEL_AXIS_MIN,
+		ACCEL_AXIS_MAX,
+	)
+	az = _clip(
+		np.random.normal(base["az"], ACCEL_AXIS_NOISE_SIGMA),
+		ACCEL_AXIS_MIN,
+		ACCEL_AXIS_MAX,
+	)
+
+	bpm = 72 + np.random.normal(0, 5)  # ~72 BPM with variation
+	ecg = 2048 + np.random.normal(0, 300)  # DAC center + noise
+
+	return {
+		"GSR": float(gsr),
+		"SPO2": float(spo2),
+		"TEMP": float(temp),
+		"AX": float(ax),
+		"AY": float(ay),
+		"AZ": float(az),
+		"BPM": float(bpm),
+		"ECG": float(np.clip(ecg, 0, 4095)),
+		"ECG_HR": float(bpm),
+		"LO": 0,  # Electrodes connected
+		"RISK": 0,
+		"STATE": "SIM",
+	}

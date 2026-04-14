@@ -20,28 +20,48 @@ from model.model_utils import CLASSES, build_model
 
 CLASS_RANGES = {
 	"Normal Baseline": {
-		"gsr": (0.20, 0.45),
-		"spo2": (0.60, 0.90),
-		"temp": (0.30, 0.42),
-		"accel": (0.45, 0.55),
+		# Pre-contact baseline (no finger on sensor):
+		# GSR: raw 0-900 → norm 0.0-0.22 (but allow up to 0.50 for stability)
+		# SpO2: 0.00 (no-finger detection, unmapped)
+		# Temp: 34-35°C → norm 0.22-0.31
+		# Accel: near-zero, stationary
+		"gsr": (0.00, 0.50),
+		"spo2": (0.00, 0.25),
+		"temp": (0.20, 0.35),
+		"accel": (0.00, 0.05),
 	},
 	"Sympathetic Arousal": {
-		"gsr": (0.50, 0.70),
-		"spo2": (0.33, 0.60),
-		"temp": (0.35, 0.50),
-		"accel": (0.50, 0.75),
+		# Post-contact stressed state (finger on sensor, during contact):
+		# GSR: raw 2000-2800 → norm 0.30-0.70
+		# SpO2: locked at 90 → norm 0.33
+		# Temp: no significant change, same as baseline
+		# Accel: still stationary but slight motion possible
+		"gsr": (0.30, 0.70),
+		"spo2": (0.20, 0.40),
+		"temp": (0.20, 0.40),
+		"accel": (0.00, 0.10),
 	},
 	"Parasympathetic Suppression": {
-		"gsr": (0.05, 0.20),
-		"spo2": (0.00, 0.33),
-		"temp": (0.27, 0.36),
-		"accel": (0.45, 0.55),
+		# Low arousal, high vagal tone:
+		# GSR: very low, minimal sweat response
+		# SpO2: very low or unstable
+		# Temp: low baseline
+		# Accel: minimal movement
+		"gsr": (0.05, 0.25),
+		"spo2": (0.00, 0.20),
+		"temp": (0.18, 0.32),
+		"accel": (0.00, 0.08),
 	},
 	"Mixed Dysregulation": {
-		"gsr": (0.45, 0.68),
-		"spo2": (0.20, 0.60),
-		"temp": (0.38, 0.55),
-		"accel": (0.60, 1.00),
+		# High stress, dysregulated response:
+		# GSR: very high sustained
+		# SpO2: moderate instability
+		# Temp: elevated
+		# Accel: elevated movement
+		"gsr": (0.50, 1.00),
+		"spo2": (0.25, 0.50),
+		"temp": (0.32, 0.48),
+		"accel": (0.08, 0.35),
 	},
 }
 

@@ -261,6 +261,9 @@ def mc_dropout_predict(model: Union[ANSClassifier, SimpleModel], window: np.ndar
 	# Handle SimpleModel differently (no MC-dropout, just single forward pass)
 	if isinstance(model, SimpleModel):
 		probs, cav = model.forward_with_cav(batch, training=False, mc_dropout=False)
+		# probs and cav are already numpy arrays, don't call .numpy()
+		probs = np.asarray(probs)
+		cav = np.asarray(cav)
 		# Repeat for T iterations to simulate uncertainty
 		probs_samples = [probs for _ in range(T)]
 		cav_samples = [cav for _ in range(T)]
@@ -268,8 +271,16 @@ def mc_dropout_predict(model: Union[ANSClassifier, SimpleModel], window: np.ndar
 		# TensorFlow model with MC-dropout
 		for _ in range(T):
 			probs, cav = model.forward_with_cav(batch, training=False, mc_dropout=True)
-			probs_samples.append(probs.numpy()[0])
-			cav_samples.append(cav.numpy()[0])
+			# Handle both TensorFlow tensors and numpy arrays
+			if hasattr(probs, 'numpy'):
+				probs_samples.append(probs.numpy()[0])
+			else:
+				probs_samples.append(np.asarray(probs)[0])
+			
+			if hasattr(cav, 'numpy'):
+				cav_samples.append(cav.numpy()[0])
+			else:
+				cav_samples.append(np.asarray(cav)[0])
 
 	probs_samples = np.asarray(probs_samples)
 	cav_samples = np.asarray(cav_samples)

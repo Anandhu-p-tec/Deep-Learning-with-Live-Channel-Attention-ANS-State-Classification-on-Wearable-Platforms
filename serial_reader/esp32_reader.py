@@ -16,10 +16,23 @@ logger = logging.getLogger(__name__)
 _LAST_GSR: float = 1000.0
 
 
-# ESP32 ADC commonly reports 0-4095 (12-bit). Keep parser tolerant to both
-# legacy 0-1023 and 12-bit firmware output.
+# CALIBRATED HARDWARE BASELINES (from ESP32 actual measurements)
+# Used for feature normalization to identify ANS states
+GSR_BASELINE = 1625.0      # Normal: 500-2750 (midpoint 1625)
+GSR_STRESS_HIGH = 2750.0   # High stress threshold
+GSR_STRESS_LOW = 500.0     # Low stress threshold
+
+SPO2_BASELINE = 90.5       # Normal SpO2 %
+SPO2_STRESS_HIGH = 93.0    # Sympathetic arousal threshold
+SPO2_STRESS_LOW = 87.0     # Parasympathetic suppression threshold
+
+TEMP_BASELINE = 36.5       # Normal: 36-37°C (midpoint 36.5)
+TEMP_STRESS_HIGH = 37.5    # Sympathetic arousal threshold
+TEMP_STRESS_LOW = 35.5     # Parasympathetic suppression threshold
+
+# Keep these for compatibility, but using new baselines above
 GSR_MIN, GSR_MAX = 0.0, 4095.0
-SPO2_MIN, SPO2_MAX = 90.0, 100.0
+SPO2_MIN, SPO2_MAX = 85.0, 100.0
 TEMP_MIN, TEMP_MAX = 35.0, 40.0
 ACCEL_MAG_MIN, ACCEL_MAG_MAX = 0.0, 20.0
 
@@ -67,31 +80,74 @@ def parse_line(line):
 
 
 def normalize_reading(data):
-	"""Normalize raw reading to model channels [GSR, SpO2, Temp, Accel]."""
+	"""
+	Normalize raw reading to model channels [GSR, SpO2, Temp, Accel].
+	
+	CALIBRATED BASELINES (from actual ESP32 hardware):
+	NORMAL:
+	  GSR: 2500-3000 (±250 from 2750)
+	  SPO2: 89-92% (±1.5 from 90.5)
+	  TEMP: 36.5-37.0°C
+	  
+	SYMPATHETIC_AROUSAL (Fight/Flight):
+	  GSR: > 3200
+	  SPO2: < 88% OR > 93%
+	  TEMP: > 37.5°C
+	  
+	PARASYMPATHETIC_SUPPRESSION (Under-activated):
+	  GSR: < 1500
+	  SPO2: < 87%
+	  TEMP: < 36°C
+	"""
+	if data is None or not isinstance(data, dict):
+		return None
 	global _LAST_GSR
+	
+	# ─── GSR NORMALIZATION (Hardware baseline: 500-2750) ───
 	gsr_raw = float(data.get("GSR", 0.0))
 	if gsr_raw < 50.0:
 		gsr_raw = _LAST_GSR
 	else:
 		_LAST_GSR = gsr_raw
-	gsr_norm = min(gsr_raw / 4095.0, 1.0)
+	# Normalize around normal baseline: 1625 (midpoint of 500-2750)
+	# Values at 1625 → 0.5 (normal), <500 → 0 (para_supp), >2750 → 1.0 (symp_arousal)
+	gsr_baseline = 1625.0
+	gsr_range = 1125.0  # ±1125 from baseline (500-2750)
+	gsr_norm = (gsr_raw - gsr_baseline) / gsr_range + 0.5  # Shift to 0-1 scale
+	gsr_norm = max(0.0, min(gsr_norm, 1.0))  # Clip to 0-1
 
+	# ─── SPO2 NORMALIZATION (Hardware baseline: 90.5%) ───
 	spo2_raw = float(data.get("SPO2", 0.0))
 	if spo2_raw < 1.0:
-		spo2_norm = 0.75
+		# Missing SPO2 - indicates finger not on sensor
+		spo2_norm = 0.5  # Neutral (neither normal nor stress)
+		spo2_missing = True
 	else:
-		spo2_norm = max(0.0, min((spo2_raw - 85.0) / 15.0, 1.0))
+		# Normalize around normal baseline: 89-92% (center at 90.5)
+		# Values at 90.5% → 0.5 (normal), <87% → negative (para_supp), >93% → >0.65 (symp_arousal)
+		spo2_baseline = 90.5
+		spo2_range = 5.0  # ±2.5 from baseline covers 88-93
+		spo2_norm = (spo2_raw - spo2_baseline) / spo2_range + 0.5  # Shift to 0-1 scale
+		spo2_norm = max(0.0, min(spo2_norm, 1.0))  # Clip to 0-1
+		spo2_missing = False
 
+	# ─── TEMP NORMALIZATION (Hardware baseline: 36-37°C) ───
 	temp_raw = float(data.get("TEMP", 35.0))
-	temp_norm = max(0.0, min((temp_raw - 30.0) / 15.0, 1.0))
+	# Normalize around normal baseline: 36.5°C (midpoint of 36-37)
+	# Values at 36.5°C → 0.5 (normal), <35.5°C → <0 (para_supp), >37.5°C → >1.0 (symp_arousal)
+	temp_baseline = 36.5
+	temp_range = 1.0  # ±0.5 from baseline (36-37)
+	temp_norm = (temp_raw - temp_baseline) / temp_range + 0.5  # Shift to 0-1 scale
+	temp_norm = max(0.0, min(temp_norm, 1.0))  # Clip to 0-1
 
+	# ─── ACCEL NORMALIZATION ───
 	ax = float(data.get("AX", 0.0))
 	ay = float(data.get("AY", 0.0))
 	az = float(data.get("AZ", 0.0))
 	accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
 	accel_norm = min(accel_mag / 2.0, 1.0)
 
-	# ECG is display-only and does not enter the 4-channel model input.
+	# ─── ECG (Display-only, does not enter 4-channel model) ───
 	ecg_raw = float(data.get("ECG", 2048.0))
 	lo_off = int(float(data.get("LO", 1.0)))
 	if lo_off == 1 or ecg_raw == 0.0:
@@ -99,6 +155,7 @@ def normalize_reading(data):
 	else:
 		ecg_norm = max(0.0, min(ecg_raw / 4095.0, 1.0))
 	data["ECG_NORM"] = ecg_norm
+	data["SPO2_MISSING"] = spo2_missing
 
 	return np.array([
 		gsr_norm, spo2_norm, temp_norm, accel_norm

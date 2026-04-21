@@ -1,0 +1,165 @@
+================================================================================
+                    ANS STATE MONITOR - QUICK START GUIDE
+================================================================================
+
+🚀 FASTEST WAY TO START THE PROJECT
+================================================================================
+
+Simply DOUBLE-CLICK one of these files in the project folder:
+
+  ✓ START.bat           → For Windows cmd/PowerShell (RECOMMENDED)
+  ✓ START.ps1           → For PowerShell (Alternative)
+
+
+What happens:
+  1. Virtual environment automatically activates
+  2. Streamlit app starts
+  3. Browser opens to http://localhost:8511
+  4. Dashboard is ready to use!
+
+
+================================================================================
+📋 MANUAL STARTUP (If Scripts Don't Work)
+================================================================================
+
+OPTION 1 - PowerShell Terminal:
+  cd C:\Users\ranan\Desktop\ANS
+  .\.venv\Scripts\Activate.ps1
+  python -m streamlit run app.py --server.port 8511 --logger.level=info
+
+
+OPTION 2 - Command Prompt (cmd.exe):
+  cd C:\Users\ranan\Desktop\ANS
+  .venv\Scripts\activate.bat
+  python -m streamlit run app.py --server.port 8511 --logger.level=info
+
+
+================================================================================
+🔧 HARDWARE SETUP (Before Starting)
+================================================================================
+
+CONNECTED MODE (Live ESP32 Data):
+  1. Plug ESP32 microcontroller into USB port
+  2. Verify COM port in Device Manager (usually COM3)
+  3. Double-click START.bat
+  4. Check sidebar - should show "● ESP32 Live"
+
+SIMULATION MODE (No Hardware):
+  1. No ESP32 needed
+  2. Double-click START.bat
+  3. Sidebar shows "◎ Simulation"
+  4. Select demo state from "Simulate State:" dropdown
+
+
+================================================================================
+🌐 ACCESSING THE DASHBOARD
+================================================================================
+
+After starting, the app automatically opens in your browser:
+  URL: http://localhost:8511
+
+If it doesn't open:
+  - Manually open browser
+  - Type: http://localhost:8511
+  - Press Enter
+
+
+================================================================================
+⏹️ STOPPING THE APP
+================================================================================
+
+In Terminal:
+  Press Ctrl+C
+
+
+In Browser:
+  Go back to terminal and press Ctrl+C
+
+
+================================================================================
+❌ TROUBLESHOOTING
+================================================================================
+
+Problem: "Script execution disabled" error with START.ps1
+  Solution: 
+    1. Open PowerShell as Administrator
+    2. Run: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+    3. Try START.ps1 again
+
+Problem: "Port 8511 already in use"
+  Solution:
+    1. Close other Streamlit instances
+    2. Or edit START.bat to use different port (e.g., 8512)
+
+Problem: ESP32 not detected (shows "◎ Simulation")
+  Solution:
+    1. Check USB cable connection
+    2. Verify COM port in Device Manager
+    3. Update ESP32_PORT environment variable if needed
+    4. Restart app
+
+
+================================================================================
+📁 PROJECT STRUCTURE
+================================================================================
+
+ANS/
+  ├── START.bat                  ← Double-click to start (Windows)
+  ├── START.ps1                  ← Double-click to start (PowerShell)
+  ├── app.py                     ← Main dashboard application
+  ├── requirements.txt           ← Python dependencies
+  ├── PROJECT_DOCUMENTATION.md   ← Full documentation
+  │
+  ├── model/
+  │   ├── model_utils.py         ← Deep learning model
+  │   └── saved/
+  │       └── ans_model.h5       ← Pre-trained weights
+  │
+  └── serial_reader/
+      ├── esp32_reader.py        ← Serial data parser
+      └── serial_thread.py       ← Background data collection
+
+
+================================================================================
+📊 DASHBOARD TABS
+================================================================================
+
+Tab 1: "Live Sensor Monitor"
+  - Real-time sensor readings (GSR, SpO2, Temp, BPM)
+  - Live time-series graphs
+  - ECG waveform display
+  - Connection status
+
+Tab 2: "AI Analysis"
+  - ANS state prediction (Neural Network output)
+  - Confidence score
+  - Per-sensor attribution
+  - Clinical interpretation
+
+
+================================================================================
+✅ VERIFICATION CHECKLIST
+================================================================================
+
+After starting the app, verify:
+  ☐ Browser shows dashboard (http://localhost:8511)
+  ☐ Connection panel shows either "● ESP32 Live" or "◎ Simulation"
+  ☐ Live Sensor Monitor tab displays values
+  ☐ AI Analysis tab shows predictions
+  ☐ No error messages in terminal/terminal output
+
+
+================================================================================
+🆘 NEED HELP?
+================================================================================
+
+1. Check PROJECT_DOCUMENTATION.md for full technical details
+2. Look at terminal output for error messages
+3. Try the Simulation mode first (doesn't need hardware)
+4. Restart app and try again
+
+
+================================================================================
+Last Updated: April 15, 2026
+Ready for Final Year Evaluation ✓
+================================================================================

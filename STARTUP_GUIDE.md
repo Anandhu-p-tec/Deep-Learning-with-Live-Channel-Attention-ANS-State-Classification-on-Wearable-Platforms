@@ -8,7 +8,9 @@ Open PowerShell in:
 
 `C:\Users\ranan\Desktop\Deep-Learning-with-Live-Channel-Attention-ANS-State-Classification-on-Wearable-Platforms`
 
-## 2) Start the app (recommended)
+## 2) Start the app
+
+**Option A: Quick Demo (using demo launcher)**
 
 Use the demo launcher:
 
@@ -16,11 +18,24 @@ Use the demo launcher:
 .\run_demo.ps1
 ```
 
+**Option B: Full Logging (Recommended for development)**
+
+For complete terminal visibility with all logs:
+
+```powershell
+& .\.venv\Scripts\Activate.ps1
+python -m streamlit run app.py --server.port 8511 --logger.level=info
+```
+
+This shows `[INIT]`, `[SERIAL THREAD]`, and hardware detection messages in real-time.
+
+---
+
 **⏱️ First startup may take 45+ seconds** as the app waits for hardware detection. This gives the ESP32 time to be recognized on the USB port.
 
 Expected output includes:
 
-- `Starting ANS dashboard in demo-safe mode...`
+- `Starting ANS dashboard in demo-safe mode...` (or direct startup with Option B)
 - `Local URL: http://localhost:8511`
 - `[INIT] Background serial thread initialized`
 - Within 45 seconds: **✅ ESP32 CONNECTED** (if hardware present) OR **⚠️ No hardware** (if not connected)
@@ -87,19 +102,33 @@ In the terminal where Streamlit is running:
 
 ---
 
-## Optional: Manual start (without demo script)
+## Optional: Manual start (Recommended for development & debugging)
 
-Use venv_short directly:
+**Use the full `.venv` environment with full logging:**
+
+```powershell
+& .\.venv\Scripts\Activate.ps1
+python -m streamlit run app.py --server.port 8511 --logger.level=info
+```
+
+**This method:**
+- ✅ Shows all terminal logs in real-time
+- ✅ Uses the complete `.venv` environment
+- ✅ Properly tracks serial thread initialization `[INIT] Background serial thread initialized`
+- ✅ Displays hardware connection status clearly
+- ✅ Best for troubleshooting ESP32 connection issues
+
+**If missing packages:**
+
+```powershell
+pip install -r requirements.txt
+```
+
+**Legacy method (venv_short - quick but less transparent):**
 
 ```powershell
 & .\.venv_short\Scripts\Activate.ps1
 python -m streamlit run app.py --server.port 8511
-```
-
-If missing packages:
-
-```powershell
-.\venv_short\Scripts\python.exe -m pip install streamlit pyserial
 ```
 
 ## Daily quick flow

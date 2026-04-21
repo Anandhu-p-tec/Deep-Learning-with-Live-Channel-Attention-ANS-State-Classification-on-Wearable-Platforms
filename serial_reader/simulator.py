@@ -7,42 +7,57 @@ from typing import Dict
 import numpy as np
 
 
-GSR_MIN, GSR_MAX = 0.0, 1023.0
-SPO2_MIN, SPO2_MAX = 90.0, 100.0
+# CALIBRATED HARDWARE BASELINES (from ESP32 actual measurements)
+GSR_BASELINE = 1625.0       # Correct: midpoint of 500-2750 Ω range
+GSR_STRESS_HIGH = 2750.0
+GSR_STRESS_LOW = 500.0
+
+SPO2_BASELINE = 90.5
+SPO2_STRESS_HIGH = 93.0
+SPO2_STRESS_LOW = 87.0
+
+TEMP_BASELINE = 36.5        # Correct: normal body temp center
+TEMP_STRESS_HIGH = 37.5
+TEMP_STRESS_LOW = 36.0
+
+# Backward compatibility
+GSR_MIN, GSR_MAX = 0.0, 4095.0
+SPO2_MIN, SPO2_MAX = 85.0, 100.0
 TEMP_MIN, TEMP_MAX = 35.0, 40.0
 ACCEL_AXIS_MIN, ACCEL_AXIS_MAX = -2.0, 2.0
 ACCEL_MAG_MIN, ACCEL_MAG_MAX = 0.0, 20.0
 
 
+# Updated MODE_CONFIG to use actual sensor baselines
 MODE_CONFIG = {
 	"normal_baseline": {
-		"gsr": 400.0,
-		"spo2": 98.0,
-		"temp": 36.5,
+		"gsr": GSR_BASELINE,           # 1625 (normal: 500-2750)
+		"spo2": SPO2_BASELINE,         # 90.5% (normal)
+		"temp": TEMP_BASELINE,         # 36.5°C (normal: 36-37)
 		"ax": 0.0,
 		"ay": 0.0,
 		"az": 0.0,
 	},
 	"sympathetic_arousal": {
-		"gsr": 750.0,
-		"spo2": 96.0,
-		"temp": 37.2,
+		"gsr": 2200.0,                 # High stress GSR (elevated sweat)
+		"spo2": 88.5,                  # Lower SpO2 (stress/breathing change)
+		"temp": 37.5,                  # Elevated temp
 		"ax": 0.15,
 		"ay": 0.08,
 		"az": 0.12,
 	},
 	"parasympathetic_suppression": {
-		"gsr": 300.0,
-		"spo2": 93.0,
-		"temp": 36.0,
+		"gsr": 800.0,                  # Very low GSR (under-activated)
+		"spo2": 85.5,                  # Low SpO2
+		"temp": 35.5,                  # Low temp
 		"ax": 0.0,
 		"ay": 0.0,
 		"az": 0.0,
 	},
 	"mixed_dysregulation": {
-		"gsr": 650.0,
-		"spo2": 94.0,
-		"temp": 37.5,
+		"gsr": 2500.0,                 # High GSR (dysregulation)
+		"spo2": 86.5,                  # Low SPO2 (conflicting signals)
+		"temp": 37.5,                  # Elevated
 		"ax": 0.4,
 		"ay": 0.25,
 		"az": 0.3,
@@ -50,9 +65,9 @@ MODE_CONFIG = {
 }
 
 
-GSR_NOISE_SIGMA = 0.02 * (GSR_MAX - GSR_MIN)
-SPO2_NOISE_SIGMA = 0.02 * (SPO2_MAX - SPO2_MIN)
-TEMP_NOISE_SIGMA = 0.02 * (TEMP_MAX - TEMP_MIN)
+GSR_NOISE_SIGMA = 100.0        # ±100 from baseline
+SPO2_NOISE_SIGMA = 0.5         # ±0.5% from baseline
+TEMP_NOISE_SIGMA = 0.2         # ±0.2°C from baseline
 ACCEL_AXIS_NOISE_SIGMA = 0.02 * (ACCEL_AXIS_MAX - ACCEL_AXIS_MIN)
 
 
@@ -110,9 +125,15 @@ def get_simulated_window(mode: str, n_samples: int = 500) -> np.ndarray:
 	"""Return normalized window shaped (n_samples, 4).
 
 	Output columns: [gsr_norm, spo2_norm, temp_norm, accel_magnitude_norm].
+	Uses baseline-relative normalization matching esp32_reader.py.
 	"""
 	_validate_mode(mode)
 	window = np.zeros((n_samples, 4), dtype=np.float32)
+
+	# Normalization ranges (matching esp32_reader.py)
+	gsr_range = 1125.0    # ±1125 from baseline 1625 (500-2750 range)
+	spo2_range = 5.0      # ±5% from baseline 90.5
+	temp_range = 1.0      # ±1°C from baseline 36.5 (spans 35.5-37.5)
 
 	for i in range(n_samples):
 		sample = get_simulated_sample(mode)
@@ -120,10 +141,16 @@ def get_simulated_window(mode: str, n_samples: int = 500) -> np.ndarray:
 			np.sqrt(sample["ax"] ** 2 + sample["ay"] ** 2 + sample["az"] ** 2)
 		)
 
-		window[i, 0] = _normalize(sample["gsr"], GSR_MIN, GSR_MAX)
-		window[i, 1] = _normalize(sample["spo2"], SPO2_MIN, SPO2_MAX)
-		window[i, 2] = _normalize(sample["temp"], TEMP_MIN, TEMP_MAX)
-		window[i, 3] = _normalize(accel_mag, ACCEL_MAG_MIN, ACCEL_MAG_MAX)
+		# Baseline-relative normalization (maps normal ~ 0.5, stress -> extremes)
+		gsr_norm = _clip((sample["gsr"] - GSR_BASELINE) / gsr_range + 0.5, 0.0, 1.0)
+		spo2_norm = _clip((sample["spo2"] - SPO2_BASELINE) / spo2_range + 0.5, 0.0, 1.0)
+		temp_norm = _clip((sample["temp"] - TEMP_BASELINE) / temp_range + 0.5, 0.0, 1.0)
+		accel_norm = _normalize(accel_mag, ACCEL_MAG_MIN, ACCEL_MAG_MAX)
+
+		window[i, 0] = gsr_norm
+		window[i, 1] = spo2_norm
+		window[i, 2] = temp_norm
+		window[i, 3] = accel_norm
 
 	return window
 

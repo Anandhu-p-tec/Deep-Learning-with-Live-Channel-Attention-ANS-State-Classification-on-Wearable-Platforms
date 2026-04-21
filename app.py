@@ -64,6 +64,7 @@ defaults = {
     "last_mode_logged": None,
     "cycle_count": 0,
     "spo2_zero_start_time": None,
+    "sim_state_selected": "normal_baseline",
     "stream_buffer": {
         "readings": [],
         "gsr": [],
@@ -1760,6 +1761,10 @@ def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
 
     sim_state = None
     if mode == "simulation":
+        # Initialize default sim state if not already set
+        if "sim_state_selected" not in st.session_state:
+            st.session_state.sim_state_selected = "normal_baseline"
+        
         sim_state = st.sidebar.selectbox(
             "Simulate State:",
             [
@@ -1768,9 +1773,23 @@ def render_sidebar_panel(mode: str) -> Tuple[Optional[str], int, str]:
                 "parasympathetic_suppression",
                 "mixed_dysregulation",
             ],
+            index=[
+                "normal_baseline",
+                "sympathetic_arousal",
+                "parasympathetic_suppression",
+                "mixed_dysregulation",
+            ].index(st.session_state.get("sim_state_selected", "normal_baseline")),
             format_func=lambda x: x.replace("_", " ").title(),
+            on_change=lambda: st.session_state.update({"sim_state_selected": st.session_state.get("sim_state_sidebar", "normal_baseline")}),
             key="sim_state_sidebar",
         )
+        
+        # Store the selection persistently
+        st.session_state.sim_state_selected = sim_state
+        
+        # Show which state is being simulated
+        state_display = sim_state.replace("_", " ").title()
+        st.sidebar.info(f"📊 Simulating: **{state_display}**")
 
     st.sidebar.divider()
     render_sidebar_live_values()
